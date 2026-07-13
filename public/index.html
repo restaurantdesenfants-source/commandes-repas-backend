@@ -13,6 +13,7 @@
     <nav class="tabs">
       <a href="/" class="active">École</a>
       <a href="/cuisine.html">Cuisine</a>
+      <a href="/facturation.html">Facturation</a>
     </nav>
   </div>
 </header>
@@ -42,6 +43,8 @@
       </div>
       <button class="link-btn" id="btn-change-school">Changer d'école</button>
     </div>
+
+    <div id="correction-card" style="display:none"></div>
 
     <label class="checkbox-row">
       <input type="checkbox" id="same-all-week" />
@@ -122,6 +125,104 @@ function showOrderScreen() {
   document.getElementById("order-school-name").textContent = schoolName;
   renderDays();
   updateTotals();
+  loadCorrectionCard();
+}
+
+async function loadCorrectionCard() {
+  const box = document.getElementById("correction-card");
+  box.style.display = "none";
+  try {
+    const res = await fetch("/api/orders/mine", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schoolName, code: accessCode, weekKey: weekKeyFor(getCurrentWeekMonday()) }),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.order || !data.correctionOpen || !data.todayDayId) return;
+
+    const dayId = data.todayDayId;
+    const dayLabel = JOURS.find((j) => j.id === dayId)?.label || dayId;
+    const current = data.order.week[dayId] || emptyDay();
+    let delta = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+
+    function renderCorrectionCard() {
+      box.innerHTML = `
+        <div class="day-card" style="border-color:#c9a227">
+          <p class="day-card-title">Rectification pour aujourd'hui — ${dayLabel}</p>
+          <p class="help-text-small" style="margin-top:-8px">Ajoutez ou retirez des repas pour aujourd'hui uniquement, jusqu'à 9h15.</p>
+          <div class="field-grid" id="correction-fields"></div>
+          <p class="help-text-small" id="correction-preview"></p>
+          <button class="primary-btn" id="btn-send-correction" style="margin-top:10px">Envoyer la rectification</button>
+          <p id="correction-result" style="display:none"></p>
+        </div>
+      `;
+      const fieldsEl = document.getElementById("correction-fields");
+      CHAMPS.forEach((c) => {
+        const wrap = document.createElement("div");
+        wrap.className = "field-item";
+        wrap.innerHTML = `<label>${c.label}${c.unit ? ` (${c.unit})` : ""} — actuellement ${current[c.id]}</label>`;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = c.step || "1";
+        input.value = 0;
+        input.addEventListener("focus", () => input.select());
+        input.addEventListener("input", () => {
+          delta[c.id] = parseFloat(input.value) || 0;
+          updatePreview();
+        });
+        wrap.appendChild(input);
+        fieldsEl.appendChild(wrap);
+      });
+      document.getElementById("btn-send-correction").addEventListener("click", sendCorrection);
+      updatePreview();
+    }
+
+    function updatePreview() {
+      const preview = CHAMPS.map((c) => {
+        const nv = Math.max(0, Number(current[c.id] || 0) + Number(delta[c.id] || 0));
+        return `${c.label} : ${nv}`;
+      }).join(" · ");
+      document.getElementById("correction-preview").textContent = `Après rectification → ${preview}`;
+    }
+
+    async function sendCorrection() {
+      const hasChange = Object.values(delta).some((v) => v !== 0);
+      if (!hasChange) return;
+      const btn = document.getElementById("btn-send-correction");
+      btn.disabled = true;
+      btn.textContent = "Envoi…";
+      try {
+        const res2 = await fetch("/api/orders/correction", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ schoolName, code: accessCode, dayId, delta }),
+        });
+        const data2 = await res2.json();
+        const resultEl = document.getElementById("correction-result");
+        resultEl.style.display = "block";
+        if (!data2.ok) {
+          resultEl.className = "error-text";
+          resultEl.textContent = data2.error || "Erreur lors de la rectification.";
+        } else if (data2.emailSent) {
+          resultEl.className = "confirm-title";
+          resultEl.textContent = "✓ Rectification enregistrée, email de confirmation envoyé.";
+        } else {
+          resultEl.className = "error-text";
+          resultEl.textContent = `Rectification enregistrée, mais l'email a échoué : ${data2.emailError || "cause inconnue"}`;
+        }
+        btn.textContent = "Envoyer la rectification";
+        btn.disabled = false;
+      } catch (e) {
+        btn.textContent = "Envoyer la rectification";
+        btn.disabled = false;
+      }
+    }
+
+    renderCorrectionCard();
+    box.style.display = "block";
+  } catch (e) {
+    // Pas de rectification possible pour l'instant, on ne bloque rien.
+  }
 }
 
 function renderDays() {
