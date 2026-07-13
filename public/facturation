@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fiche de commande — Facturation</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/cuisine.html">Cuisine</a>
+      <a href="/facturation.html" class="active">Facturation</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow">Historique</p>
+        <h1>🧾 Facturation par école</h1>
+      </div>
+    </div>
+
+    <div id="login-block">
+      <p class="help-text">Cette page est réservée à la cuisine. Entrez le code d'accès.</p>
+      <input type="password" id="kitchen-code" placeholder="Code cuisine" />
+      <p class="error-text" id="kitchen-error" style="display:none"></p>
+      <button class="primary-btn" id="btn-kitchen-login">Accéder</button>
+    </div>
+
+    <div id="billing-content" style="display:none"></div>
+  </div>
+</main>
+
+<script src="/shared.js"></script>
+<script>
+let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
+let months = [];
+let selectedMonth = null;
+
+if (kitchenCode) tryLoad();
+
+document.getElementById("btn-kitchen-login").addEventListener("click", () => {
+  kitchenCode = document.getElementById("kitchen-code").value.trim();
+  if (!kitchenCode) return;
+  tryLoad();
+});
+
+async function tryLoad() {
+  const errEl = document.getElementById("kitchen-error");
+  errEl.style.display = "none";
+  try {
+    const res = await fetch(`/api/billing/months?code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = "Code cuisine incorrect.";
+      errEl.style.display = "block";
+      sessionStorage.removeItem("kitchenCode");
+      return;
+    }
+    sessionStorage.setItem("kitchenCode", kitchenCode);
+    months = data.months || [];
+    document.getElementById("login-block").style.display = "none";
+    document.getElementById("billing-content").style.display = "block";
+    renderMonthPicker();
+  } catch (e) {
+    errEl.textContent = "Erreur de connexion, réessayez.";
+    errEl.style.display = "block";
+  }
+}
+
+function monthLabel(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1, 1));
+  return d.toLocaleDateString("fr-FR", { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+function renderMonthPicker() {
+  const content = document.getElementById("billing-content");
+  if (!months.length) {
+    content.innerHTML = `<div class="empty-state">🧾<p class="help-text">Aucune commande enregistrée pour l'instant.</p></div>`;
+    return;
+  }
+  selectedMonth = selectedMonth || months[0];
+  content.innerHTML = `
+    <label class="field-label">Mois</label>
+    <select id="month-select" style="width:100%;padding:12px 14px;border-radius:9px;border:1px solid #ddd6c4;font-size:16px;margin-bottom:20px;font-family:'Work Sans',sans-serif">
+      ${months.map((m) => `<option value="${m}" ${m === selectedMonth ? "selected" : ""}>${monthLabel(m)}</option>`).join("")}
+    </select>
+    <div id="month-content"><p class="help-text">Chargement…</p></div>
+  `;
+  document.getElementById("month-select").addEventListener("change", (e) => {
+    selectedMonth = e.target.value;
+    loadMonth();
+  });
+  loadMonth();
+}
+
+async function loadMonth() {
+  const el = document.getElementById("month-content");
+  el.innerHTML = `<p class="help-text">Chargement…</p>`;
+  try {
+    const res = await fetch(`/api/billing?code=${encodeURIComponent(kitchenCode)}&month=${encodeURIComponent(selectedMonth)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      el.innerHTML = `<p class="error-text">${data.error || "Erreur de chargement."}</p>`;
+      return;
+    }
+    renderMonth(data);
+  } catch (e) {
+    el.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+function renderMonth(data) {
+  const el = document.getElementById("month-content");
+  if (!data.schools.length) {
+    el.innerHTML = `<div class="empty-state">🧾<p class="help-text">Aucune commande pour ce mois.</p></div>`;
+    return;
+  }
+
+  const grandTotal = data.totals.maternelle + data.totals.primaire + data.totals.primairePlus;
+
+  let html = `
+    <div class="stat-grid">
+      <div class="stat-card"><span class="stat-value">${data.totals.soupe} L</span><span class="stat-label">Soupe</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.maternelle}</span><span class="stat-label">Maternelle</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.primaire}</span><span class="stat-label">Primaire</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+    </div>
+    <p class="total-row" style="margin-top:4px"><span>Total repas du mois (toutes écoles)</span><span class="total-value">${grandTotal}</span></p>
+
+    <p class="section-title">Détail par école</p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="school-col">École</th>
+            <th>Soupe (L)</th>
+            <th>Matern.</th>
+            <th>Primaire</th>
+            <th>Primaire +</th>
+            <th>Total repas</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.schools.map((s) => {
+            const total = s.maternelle + s.primaire + s.primairePlus;
+            return `<tr>
+              <td class="school-col">${s.schoolName}</td>
+              <td>${s.soupe}</td>
+              <td>${s.maternelle}</td>
+              <td>${s.primaire}</td>
+              <td>${s.primairePlus}</td>
+              <td><strong>${total}</strong></td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  if (data.corrections && data.corrections.length) {
+    html += `<p class="section-title">Rectifications appliquées ce mois (${data.corrections.length})</p>`;
+    data.corrections
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .forEach((c) => {
+        const d = new Date(c.timestamp);
+        const dateStr = d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) + " à " + d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+        const parts = [];
+        CHAMPS.forEach((champ) => {
+          const v = c.delta[champ.id];
+          if (v) parts.push(`${champ.label} ${v > 0 ? "+" + v : v}`);
+        });
+        html += `<p class="note-tag">📝 <strong>${c.schoolName}</strong> — ${dateStr} — ${parts.join(", ")}</p>`;
+      });
+  }
+
+  document.getElementById("month-content").innerHTML = html;
+}
+</script>
+</body>
+</html>
