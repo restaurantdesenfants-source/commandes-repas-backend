@@ -57,6 +57,46 @@ function weekKeyFor(monday) {
   return `${year}-S${String(week).padStart(2, "0")}`;
 }
 
+// Lundi de la semaine EN COURS (pas la semaine ciblée par les nouvelles commandes) —
+// utilisé pour les rectifications du jour même.
+function getCurrentWeekMonday(now = new Date()) {
+  const day = now.getDay(); // 0=dim ... 1=lun ... 6=sam
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() + diffToMonday);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+// Heure actuelle à Bruxelles (gère automatiquement l'heure d'été/hiver), sans dépendance.
+function brusselsNow() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Brussels",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const map = {};
+  parts.forEach((p) => (map[p.type] = p.value));
+  const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { weekday: dayMap[map.weekday], hour: parseInt(map.hour, 10), minute: parseInt(map.minute, 10) };
+}
+
+// La rectification du jour n'est ouverte qu'un jour d'école, avant 9h15 (heure de Bruxelles).
+function isCorrectionWindowOpen() {
+  const { weekday, hour, minute } = brusselsNow();
+  const schoolDays = [1, 2, 4, 5]; // lundi, mardi, jeudi, vendredi
+  if (!schoolDays.includes(weekday)) return false;
+  return hour < 9 || (hour === 9 && minute <= 15);
+}
+
+function todayDayId() {
+  const { weekday } = brusselsNow();
+  const map = { 1: "lundi", 2: "mardi", 4: "jeudi", 5: "vendredi" };
+  return map[weekday] || null;
+}
+
 function fmtDeadline(d) {
   return d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }) + " à 15h";
 }
