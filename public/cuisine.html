@@ -1,180 +1,186 @@
-// Serveur complet : sert les pages du site (formulaire école + vue cuisine),
-// enregistre les commandes, et envoie les emails de confirmation via Brevo.
-//
-// Rien à modifier ici pour l'usage courant : les réglages (clé Brevo, email
-// d'expéditeur) se font via les variables d'environnement dans Render.
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fiche de commande — Cuisine</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/cuisine.html" class="active">Cuisine</a>
+    </nav>
+  </div>
+</header>
 
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
+<main>
+  <div class="deadline-bar" id="deadline-bar"></div>
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+  <div class="card">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow" id="cuisine-week"></p>
+        <h1>👨‍🍳 Vue cuisine</h1>
+      </div>
+      <button class="link-btn" id="btn-refresh" style="display:none">↻ Actualiser</button>
+    </div>
 
-const DATA_FILE = path.join(__dirname, "orders-data.json");
+    <div id="login-block">
+      <p class="help-text">Cette page est réservée à la cuisine. Entrez le code d'accès.</p>
+      <input type="password" id="kitchen-code" placeholder="Code cuisine" />
+      <p class="error-text" id="kitchen-error" style="display:none"></p>
+      <button class="primary-btn" id="btn-kitchen-login">Accéder</button>
+    </div>
 
-const JOURS = [
-  { id: "lundi", label: "Lundi" },
-  { id: "mardi", label: "Mardi" },
-  { id: "jeudi", label: "Jeudi" },
-  { id: "vendredi", label: "Vendredi" },
-];
+    <div id="cuisine-content" style="display:none"></div>
+  </div>
+</main>
 
-// ---------- Stockage (fichier JSON local) ----------
-function loadData() {
-  try {
-    const raw = fs.readFileSync(DATA_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch (e) {
-    return { schools: {}, orders: {} };
+<script src="/shared.js"></script>
+<script>
+const target = renderDeadlineBar();
+document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(target.monday)}`;
+
+let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
+
+if (kitchenCode) {
+  tryLoad();
+}
+
+document.getElementById("btn-kitchen-login").addEventListener("click", () => {
+  kitchenCode = document.getElementById("kitchen-code").value.trim();
+  if (!kitchenCode) return;
+  tryLoad();
+});
+
+async function tryLoad() {
+  const errEl = document.getElementById("kitchen-error");
+  errEl.style.display = "none";
+  const ok = await load();
+  if (ok) {
+    sessionStorage.setItem("kitchenCode", kitchenCode);
+    document.getElementById("login-block").style.display = "none";
+    document.getElementById("cuisine-content").style.display = "block";
+    document.getElementById("btn-refresh").style.display = "inline-flex";
+  } else {
+    errEl.textContent = "Code cuisine incorrect.";
+    errEl.style.display = "block";
+    sessionStorage.removeItem("kitchenCode");
   }
 }
 
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
+async function load() {
+  const content = document.getElementById("cuisine-content");
+  content.innerHTML = `<p class="help-text">Chargement des commandes…</p>`;
+  try {
+    const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(target.monday))}&code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok) return false;
+    render(data.orders || []);
+    return true;
+  } catch (e) {
+    content.innerHTML = `<p class="error-text">Impossible de charger les commandes : ${e.message}</p>`;
+    return false;
+  }
 }
 
-function hashCode(code) {
-  return crypto.createHash("sha256").update(code.trim()).digest("hex");
-}
+function render(orders) {
+  const content = document.getElementById("cuisine-content");
 
-// ---------- Envoi d'email via Brevo ----------
-async function sendConfirmationEmail({ schoolEmail, schoolName, weekLabel, week, comment }) {
-  const lignes = JOURS.map((j) => {
-    const d = week[j.id] || {};
-    return `<tr>
-      <td style="padding:6px 10px;border:1px solid #ddd">${j.label}</td>
-      <td style="padding:6px 10px;border:1px solid #ddd">${d.soupe || 0} L</td>
-      <td style="padding:6px 10px;border:1px solid #ddd">${d.maternelle || 0}</td>
-      <td style="padding:6px 10px;border:1px solid #ddd">${d.primaire || 0}</td>
-      <td style="padding:6px 10px;border:1px solid #ddd">${d.primairePlus || 0}</td>
-    </tr>`;
-  }).join("");
+  if (!orders.length) {
+    content.innerHTML = `<div class="empty-state">📋<p class="help-text">Aucune commande reçue pour cette semaine pour l'instant.</p></div>`;
+    return;
+  }
 
-  const html = `
-    <p>Bonjour,</p>
-    <p>Voici la confirmation de votre commande pour la semaine du <strong>${weekLabel}</strong> :</p>
-    <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
-      <tr style="background:#f2efe5">
-        <th style="padding:6px 10px;border:1px solid #ddd">Jour</th>
-        <th style="padding:6px 10px;border:1px solid #ddd">Soupe</th>
-        <th style="padding:6px 10px;border:1px solid #ddd">Maternelle</th>
-        <th style="padding:6px 10px;border:1px solid #ddd">Primaire</th>
-        <th style="padding:6px 10px;border:1px solid #ddd">Primaire +</th>
-      </tr>
-      ${lignes}
-    </table>
-    ${comment ? `<p><strong>Commentaire :</strong> ${comment}</p>` : ""}
-    <p>Merci de votre commande.</p>
-  `;
+  orders.sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
 
-  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      "api-key": process.env.BREVO_API_KEY,
-    },
-    body: JSON.stringify({
-      sender: {
-        name: process.env.SENDER_NAME || "Restaurant",
-        email: process.env.SENDER_EMAIL,
-      },
-      to: [{ email: schoolEmail, name: schoolName }],
-      subject: `Confirmation de commande - ${schoolName} - semaine du ${weekLabel}`,
-      htmlContent: html,
-    }),
+  const dayTotals = {};
+  JOURS.forEach((j) => {
+    dayTotals[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    orders.forEach((o) => {
+      const d = o.week[j.id] || {};
+      dayTotals[j.id].soupe += Number(d.soupe || 0);
+      dayTotals[j.id].maternelle += Number(d.maternelle || 0);
+      dayTotals[j.id].primaire += Number(d.primaire || 0);
+      dayTotals[j.id].primairePlus += Number(d.primairePlus || 0);
+    });
   });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Brevo a refusé l'envoi : ${errText}`);
-  }
-  return res.json();
+  const weekTotals = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+  JOURS.forEach((j) => {
+    weekTotals.soupe += dayTotals[j.id].soupe;
+    weekTotals.maternelle += dayTotals[j.id].maternelle;
+    weekTotals.primaire += dayTotals[j.id].primaire;
+    weekTotals.primairePlus += dayTotals[j.id].primairePlus;
+  });
+  const grandTotal = weekTotals.maternelle + weekTotals.primaire + weekTotals.primairePlus;
+
+  let html = `
+    <div class="stat-grid">
+      <div class="stat-card"><span class="stat-value">${weekTotals.soupe} L</span><span class="stat-label">Soupe</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.maternelle}</span><span class="stat-label">Maternelle</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.primaire}</span><span class="stat-label">Primaire</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+    </div>
+    <p class="total-row" style="margin-top:4px"><span>Total repas semaine</span><span class="total-value">${grandTotal}</span></p>
+
+    <p class="section-title">Répartition par jour</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <tbody>
+          ${JOURS.map((j) => `
+            <tr>
+              <td class="school-col">${j.label}</td>
+              <td>${dayTotals[j.id].soupe}</td>
+              <td>${dayTotals[j.id].maternelle}</td>
+              <td>${dayTotals[j.id].primaire}</td>
+              <td>${dayTotals[j.id].primairePlus}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="section-title">Détail par école (${orders.length})</p>
+  `;
+
+  orders.forEach((o) => {
+    const schoolTotal = JOURS.reduce((s, j) => {
+      const d = o.week[j.id] || {};
+      return s + Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
+    }, 0);
+    const schoolSoupe = JOURS.reduce((s, j) => s + Number((o.week[j.id] || {}).soupe || 0), 0);
+
+    html += `
+      <div class="school-block">
+        <div class="school-block-head">
+          <span class="school-name">${o.schoolName}</span>
+          <span class="school-totals">${schoolTotal} repas · ${schoolSoupe} L soupe</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th class="school-col">Jour</th><th>Soupe</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+            <tbody>
+              ${JOURS.map((j) => {
+                const d = o.week[j.id] || {};
+                return `<tr><td class="school-col">${j.label}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td></tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+        ${o.comment ? `<p class="note-tag">💬 ${o.comment}</p>` : ""}
+      </div>
+    `;
+  });
+
+  document.getElementById("cuisine-content").innerHTML = html;
 }
 
-// ---------- API ----------
-
-// Vérifie ou crée le code d'accès d'une école.
-app.post("/api/access", (req, res) => {
-  const { schoolName, code } = req.body || {};
-  if (!schoolName || !code) {
-    return res.status(400).json({ ok: false, error: "Nom d'école et code requis." });
-  }
-  const nameLower = schoolName.trim().toLowerCase();
-  const data = loadData();
-  const hash = hashCode(code);
-
-  if (data.schools[nameLower]) {
-    if (data.schools[nameLower].codeHash !== hash) {
-      return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
-    }
-  } else {
-    data.schools[nameLower] = { schoolName: schoolName.trim(), codeHash: hash };
-    saveData(data);
-  }
-  res.json({ ok: true });
-});
-
-// Enregistre une commande et envoie l'email de confirmation.
-app.post("/api/orders", async (req, res) => {
-  const { schoolName, schoolEmail, code, weekKey, weekLabel, week, comment } = req.body || {};
-  if (!schoolName || !schoolEmail || !code || !weekKey || !week) {
-    return res.status(400).json({ ok: false, error: "Informations manquantes." });
-  }
-  const nameLower = schoolName.trim().toLowerCase();
-  const data = loadData();
-  const hash = hashCode(code);
-
-  if (data.schools[nameLower] && data.schools[nameLower].codeHash !== hash) {
-    return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
-  }
-  if (!data.schools[nameLower]) {
-    data.schools[nameLower] = { schoolName: schoolName.trim(), codeHash: hash };
-  }
-
-  if (!data.orders[weekKey]) data.orders[weekKey] = {};
-  data.orders[weekKey][nameLower] = {
-    schoolName: schoolName.trim(),
-    schoolEmail: schoolEmail.trim(),
-    week,
-    comment: comment || "",
-    submittedAt: new Date().toISOString(),
-  };
-  saveData(data);
-
-  let emailSent = false;
-  let emailError = null;
-  try {
-    await sendConfirmationEmail({ schoolEmail: schoolEmail.trim(), schoolName: schoolName.trim(), weekLabel, week, comment });
-    emailSent = true;
-  } catch (e) {
-    emailError = e.message;
-  }
-
-  res.json({ ok: true, emailSent, emailError });
-});
-
-// Renvoie les commandes d'une semaine (pour la vue cuisine) — protégé par un code.
-app.get("/api/orders", (req, res) => {
-  const { weekKey, code } = req.query;
-  const expected = process.env.KITCHEN_CODE;
-  if (!expected) {
-    return res.status(500).json({ ok: false, error: "Code cuisine non configuré côté serveur." });
-  }
-  if (!code || code !== expected) {
-    return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
-  }
-  const data = loadData();
-  const orders = weekKey ? data.orders[weekKey] || {} : {};
-  // On ne renvoie jamais les emails des écoles à cet écran.
-  const sanitized = Object.values(orders).map(({ schoolEmail, ...rest }) => rest);
-  res.json({ ok: true, orders: sanitized });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Serveur démarré sur le port ${PORT}`));
+document.getElementById("btn-refresh").addEventListener("click", tryLoad);
+</script>
+</body>
+</html>
