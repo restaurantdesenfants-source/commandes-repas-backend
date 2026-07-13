@@ -162,12 +162,12 @@ async function loadCorrectionCard() {
         wrap.className = "field-item";
         wrap.innerHTML = `<label>${c.label}${c.unit ? ` (${c.unit})` : ""} — actuellement ${current[c.id]}</label>`;
         const input = document.createElement("input");
-        input.type = "number";
-        input.step = c.step || "1";
+        input.type = "text";
+        input.inputMode = "decimal";
         input.value = 0;
         input.addEventListener("focus", () => input.select());
         input.addEventListener("input", () => {
-          delta[c.id] = parseFloat(input.value) || 0;
+          delta[c.id] = parseDecimal(input.value);
           updatePreview();
         });
         wrap.appendChild(input);
@@ -256,20 +256,24 @@ function renderDays() {
   }
 }
 
+function parseDecimal(str) {
+  const normalized = String(str).replace(",", ".").trim();
+  const v = parseFloat(normalized);
+  return isNaN(v) ? 0 : v;
+}
+
 function makeField(dayId, champ, applyToAll) {
   const wrap = document.createElement("div");
   wrap.className = "field-item";
   const label = document.createElement("label");
   label.textContent = champ.label + (champ.unit ? ` (${champ.unit})` : "");
   const input = document.createElement("input");
-  input.type = "number";
-  input.min = "0";
-  input.step = champ.step || "1";
+  input.type = "text";
   input.inputMode = "decimal";
   input.value = week[dayId][champ.id];
   input.addEventListener("focus", () => input.select());
   input.addEventListener("input", () => {
-    const v = Math.max(0, parseFloat(input.value) || 0);
+    const v = Math.max(0, parseDecimal(input.value));
     if (applyToAll) {
       JOURS.forEach((j) => (week[j.id][champ.id] = v));
     } else {
