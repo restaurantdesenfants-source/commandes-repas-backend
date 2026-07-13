@@ -1,7 +1,7 @@
 {
-  "name": "backend-confirmation-commandes",
-  "version": "1.0.0",
-  "description": "Serveur d'envoi des emails de confirmation de commande via Brevo",
+  "name": "commandes-repas-site",
+  "version": "2.0.0",
+  "description": "Site de commande de repas pour les écoles, avec envoi automatique d'email de confirmation via Brevo",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
