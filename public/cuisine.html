@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fiche de commande — Cuisine</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/cuisine.html" class="active">Cuisine</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="deadline-bar" id="deadline-bar"></div>
+
+  <div class="card">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow" id="cuisine-week"></p>
+        <h1>👨‍🍳 Vue cuisine</h1>
+      </div>
+      <button class="link-btn" id="btn-refresh">↻ Actualiser</button>
+    </div>
+
+    <div id="cuisine-content">
+      <p class="help-text">Chargement des commandes…</p>
+    </div>
+  </div>
+</main>
+
+<script src="/shared.js"></script>
+<script>
+const target = renderDeadlineBar();
+document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(target.monday)}`;
+
+async function load() {
+  const content = document.getElementById("cuisine-content");
+  content.innerHTML = `<p class="help-text">Chargement des commandes…</p>`;
+  try {
+    const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(target.monday))}`);
+    const data = await res.json();
+    render(data.orders || []);
+  } catch (e) {
+    content.innerHTML = `<p class="error-text">Impossible de charger les commandes : ${e.message}</p>`;
+  }
+}
+
+function render(orders) {
+  const content = document.getElementById("cuisine-content");
+
+  if (!orders.length) {
+    content.innerHTML = `<div class="empty-state">📋<p class="help-text">Aucune commande reçue pour cette semaine pour l'instant.</p></div>`;
+    return;
+  }
+
+  orders.sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
+
+  const dayTotals = {};
+  JOURS.forEach((j) => {
+    dayTotals[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    orders.forEach((o) => {
+      const d = o.week[j.id] || {};
+      dayTotals[j.id].soupe += Number(d.soupe || 0);
+      dayTotals[j.id].maternelle += Number(d.maternelle || 0);
+      dayTotals[j.id].primaire += Number(d.primaire || 0);
+      dayTotals[j.id].primairePlus += Number(d.primairePlus || 0);
+    });
+  });
+
+  const weekTotals = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+  JOURS.forEach((j) => {
+    weekTotals.soupe += dayTotals[j.id].soupe;
+    weekTotals.maternelle += dayTotals[j.id].maternelle;
+    weekTotals.primaire += dayTotals[j.id].primaire;
+    weekTotals.primairePlus += dayTotals[j.id].primairePlus;
+  });
+  const grandTotal = weekTotals.maternelle + weekTotals.primaire + weekTotals.primairePlus;
+
+  let html = `
+    <div class="stat-grid">
+      <div class="stat-card"><span class="stat-value">${weekTotals.soupe} L</span><span class="stat-label">Soupe</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.maternelle}</span><span class="stat-label">Maternelle</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.primaire}</span><span class="stat-label">Primaire</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+    </div>
+    <p class="total-row" style="margin-top:4px"><span>Total repas semaine</span><span class="total-value">${grandTotal}</span></p>
+
+    <p class="section-title">Répartition par jour</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <tbody>
+          ${JOURS.map((j) => `
+            <tr>
+              <td class="school-col">${j.label}</td>
+              <td>${dayTotals[j.id].soupe}</td>
+              <td>${dayTotals[j.id].maternelle}</td>
+              <td>${dayTotals[j.id].primaire}</td>
+              <td>${dayTotals[j.id].primairePlus}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="section-title">Détail par école (${orders.length})</p>
+  `;
+
+  orders.forEach((o) => {
+    const schoolTotal = JOURS.reduce((s, j) => {
+      const d = o.week[j.id] || {};
+      return s + Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
+    }, 0);
+    const schoolSoupe = JOURS.reduce((s, j) => s + Number((o.week[j.id] || {}).soupe || 0), 0);
+
+    html += `
+      <div class="school-block">
+        <div class="school-block-head">
+          <span class="school-name">${o.schoolName}</span>
+          <span class="school-totals">${schoolTotal} repas · ${schoolSoupe} L soupe</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th class="school-col">Jour</th><th>Soupe</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+            <tbody>
+              ${JOURS.map((j) => {
+                const d = o.week[j.id] || {};
+                return `<tr><td class="school-col">${j.label}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td></tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+        ${o.comment ? `<p class="note-tag">💬 ${o.comment}</p>` : ""}
+      </div>
+    `;
+  });
+
+  document.getElementById("cuisine-content").innerHTML = html;
+}
+
+document.getElementById("btn-refresh").addEventListener("click", load);
+load();
+</script>
+</body>
+</html>
