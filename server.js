@@ -159,12 +159,21 @@ app.post("/api/orders", async (req, res) => {
   res.json({ ok: true, emailSent, emailError });
 });
 
-// Renvoie les commandes d'une semaine (pour la vue cuisine).
+// Renvoie les commandes d'une semaine (pour la vue cuisine) — protégé par un code.
 app.get("/api/orders", (req, res) => {
-  const { weekKey } = req.query;
+  const { weekKey, code } = req.query;
+  const expected = process.env.KITCHEN_CODE;
+  if (!expected) {
+    return res.status(500).json({ ok: false, error: "Code cuisine non configuré côté serveur." });
+  }
+  if (!code || code !== expected) {
+    return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+  }
   const data = loadData();
   const orders = weekKey ? data.orders[weekKey] || {} : {};
-  res.json({ ok: true, orders: Object.values(orders) });
+  // On ne renvoie jamais les emails des écoles à cet écran.
+  const sanitized = Object.values(orders).map(({ schoolEmail, ...rest }) => rest);
+  res.json({ ok: true, orders: sanitized });
 });
 
 const PORT = process.env.PORT || 3000;
