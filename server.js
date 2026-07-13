@@ -1,21 +1,24 @@
-// Serveur complet : sert les pages du site (formulaire école + vue cuisine),
-// enregistre les commandes, et envoie les emails de confirmation via Brevo.
+// Serveur complet : sert les pages du site (formulaire école + vue cuisine +
+// facturation), enregistre les commandes dans Supabase (base de données
+// persistante, qui survit aux redéploiements), et envoie les emails de
+// confirmation via Brevo.
 //
-// Rien à modifier ici pour l'usage courant : les réglages (clé Brevo, email
-// d'expéditeur) se font via les variables d'environnement dans Render.
+// Réglages via variables d'environnement dans Render :
+// BREVO_API_KEY, SENDER_EMAIL, SENDER_NAME, KITCHEN_CODE,
+// SUPABASE_URL, SUPABASE_SERVICE_KEY
 
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-const DATA_FILE = path.join(__dirname, "orders-data.json");
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 const JOURS = [
   { id: "lundi", label: "Lundi" },
@@ -24,54 +27,11 @@ const JOURS = [
   { id: "vendredi", label: "Vendredi" },
 ];
 
-// ---------- Stockage (fichier JSON local) ----------
-function loadData() {
-  try {
-    const raw = fs.readFileSync(DATA_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed.corrections) parsed.corrections = [];
-    return parsed;
-  } catch (e) {
-    return { schools: {}, orders: {}, corrections: [] };
-  }
-}
-
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
-}
-
-// Reconstitue le lundi (UTC) d'une semaine ISO à partir de sa clé "YYYY-Sww".
-function mondayFromWeekKey(weekKey) {
-  const [yearStr, weekStr] = weekKey.split("-S");
-  const year = parseInt(yearStr, 10);
-  const week = parseInt(weekStr, 10);
-  const jan4 = new Date(Date.UTC(year, 0, 4));
-  const jan4Day = jan4.getUTCDay() || 7;
-  const week1Monday = new Date(jan4);
-  week1Monday.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
-  const monday = new Date(week1Monday);
-  monday.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7);
-  return monday;
-}
-
-const DAY_OFFSET = { lundi: 0, mardi: 1, jeudi: 3, vendredi: 4 };
-
-function dateForDay(weekKey, dayId) {
-  const monday = mondayFromWeekKey(weekKey);
-  const d = new Date(monday);
-  d.setUTCDate(monday.getUTCDate() + (DAY_OFFSET[dayId] || 0));
-  return d;
-}
-
-function monthKeyFor(date) {
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-}
-
+// ---------- Utilitaires ----------
 function hashCode(code) {
   return crypto.createHash("sha256").update(code.trim()).digest("hex");
 }
 
-// Heure actuelle à Bruxelles (gère automatiquement l'heure d'été/hiver).
 function brusselsNow() {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Brussels",
@@ -106,6 +66,92 @@ function getISOWeekKeyForDate(date) {
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   const weekNo = Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
   return `${d.getUTCFullYear()}-S${String(weekNo).padStart(2, "0")}`;
+}
+
+function mondayFromWeekKey(weekKey) {
+  const [yearStr, weekStr] = weekKey.split("-S");
+  const year = parseInt(yearStr, 10);
+  const week = parseInt(weekStr, 10);
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const week1Monday = new Date(jan4);
+  week1Monday.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
+  const monday = new Date(week1Monday);
+  monday.setUTCDate(week1Monday.getUTCDate() + (week - 1) * 7);
+  return monday;
+}
+
+const DAY_OFFSET = { lundi: 0, mardi: 1, jeudi: 3, vendredi: 4 };
+
+function dateForDay(weekKey, dayId) {
+  const monday = mondayFromWeekKey(weekKey);
+  const d = new Date(monday);
+  d.setUTCDate(monday.getUTCDate() + (DAY_OFFSET[dayId] || 0));
+  return d;
+}
+
+function monthKeyFor(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function emptyWeek() {
+  return {
+    lundi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
+    mardi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
+    jeudi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
+    vendredi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
+  };
+}
+
+// ---------- Accès base de données (Supabase) ----------
+async function getSchool(nameLower) {
+  const { data, error } = await supabase.from("schools").select("*").eq("id", nameLower).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function upsertSchool(nameLower, schoolName, codeHash) {
+  const { error } = await supabase.from("schools").upsert({ id: nameLower, school_name: schoolName, code_hash: codeHash });
+  if (error) throw error;
+}
+
+async function getOrder(weekKey, nameLower) {
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("week_key", weekKey)
+    .eq("school_name_lower", nameLower)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function upsertOrder(fields) {
+  const { error } = await supabase.from("orders").upsert(fields, { onConflict: "week_key,school_name_lower" });
+  if (error) throw error;
+}
+
+async function getOrdersForWeek(weekKey) {
+  const { data, error } = await supabase.from("orders").select("*").eq("week_key", weekKey);
+  if (error) throw error;
+  return data;
+}
+
+async function getAllOrders() {
+  const { data, error } = await supabase.from("orders").select("*");
+  if (error) throw error;
+  return data;
+}
+
+async function logCorrection(entry) {
+  const { error } = await supabase.from("corrections").insert(entry);
+  if (error) throw error;
+}
+
+async function getAllCorrections() {
+  const { data, error } = await supabase.from("corrections").select("*");
+  if (error) throw error;
+  return data;
 }
 
 // ---------- Envoi d'email via Brevo ----------
@@ -146,10 +192,7 @@ async function sendConfirmationEmail({ schoolEmail, schoolName, weekLabel, week,
       "api-key": process.env.BREVO_API_KEY,
     },
     body: JSON.stringify({
-      sender: {
-        name: process.env.SENDER_NAME || "Restaurant",
-        email: process.env.SENDER_EMAIL,
-      },
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
       to: [{ email: schoolEmail, name: schoolName }],
       subject: `Confirmation de commande - ${schoolName} - semaine du ${weekLabel}`,
       htmlContent: html,
@@ -202,10 +245,7 @@ async function sendCorrectionEmail({ schoolEmail, schoolName, dayLabel, delta, n
       "api-key": process.env.BREVO_API_KEY,
     },
     body: JSON.stringify({
-      sender: {
-        name: process.env.SENDER_NAME || "Restaurant",
-        email: process.env.SENDER_EMAIL,
-      },
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
       to: [{ email: schoolEmail, name: schoolName }],
       subject: `Rectification de commande - ${schoolName} - ${dayLabel}`,
       htmlContent: html,
@@ -221,235 +261,270 @@ async function sendCorrectionEmail({ schoolEmail, schoolName, dayLabel, delta, n
 
 // ---------- API ----------
 
-// Vérifie ou crée le code d'accès d'une école.
-app.post("/api/access", (req, res) => {
-  const { schoolName, code } = req.body || {};
-  if (!schoolName || !code) {
-    return res.status(400).json({ ok: false, error: "Nom d'école et code requis." });
-  }
-  const nameLower = schoolName.trim().toLowerCase();
-  const data = loadData();
-  const hash = hashCode(code);
+app.post("/api/access", async (req, res) => {
+  try {
+    const { schoolName, code } = req.body || {};
+    if (!schoolName || !code) {
+      return res.status(400).json({ ok: false, error: "Nom d'école et code requis." });
+    }
+    const nameLower = schoolName.trim().toLowerCase();
+    const hash = hashCode(code);
+    const school = await getSchool(nameLower);
 
-  if (data.schools[nameLower]) {
-    if (data.schools[nameLower].codeHash !== hash) {
+    if (school) {
+      if (school.code_hash !== hash) {
+        return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
+      }
+    } else {
+      await upsertSchool(nameLower, schoolName.trim(), hash);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { schoolName, schoolEmail, code, weekKey, weekLabel, week, comment } = req.body || {};
+    if (!schoolName || !schoolEmail || !code || !weekKey || !week) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    const nameLower = schoolName.trim().toLowerCase();
+    const hash = hashCode(code);
+    const school = await getSchool(nameLower);
+
+    if (school && school.code_hash !== hash) {
       return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
     }
-  } else {
-    data.schools[nameLower] = { schoolName: schoolName.trim(), codeHash: hash };
-    saveData(data);
-  }
-  res.json({ ok: true });
-});
+    if (!school) {
+      await upsertSchool(nameLower, schoolName.trim(), hash);
+    }
 
-// Enregistre une commande et envoie l'email de confirmation.
-app.post("/api/orders", async (req, res) => {
-  const { schoolName, schoolEmail, code, weekKey, weekLabel, week, comment } = req.body || {};
-  if (!schoolName || !schoolEmail || !code || !weekKey || !week) {
-    return res.status(400).json({ ok: false, error: "Informations manquantes." });
-  }
-  const nameLower = schoolName.trim().toLowerCase();
-  const data = loadData();
-  const hash = hashCode(code);
+    await upsertOrder({
+      week_key: weekKey,
+      school_name_lower: nameLower,
+      school_name: schoolName.trim(),
+      school_email: schoolEmail.trim(),
+      week,
+      comment: comment || "",
+      submitted_at: new Date().toISOString(),
+    });
 
-  if (data.schools[nameLower] && data.schools[nameLower].codeHash !== hash) {
-    return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
-  }
-  if (!data.schools[nameLower]) {
-    data.schools[nameLower] = { schoolName: schoolName.trim(), codeHash: hash };
-  }
+    let emailSent = false;
+    let emailError = null;
+    try {
+      await sendConfirmationEmail({ schoolEmail: schoolEmail.trim(), schoolName: schoolName.trim(), weekLabel, week, comment });
+      emailSent = true;
+    } catch (e) {
+      emailError = e.message;
+    }
 
-  if (!data.orders[weekKey]) data.orders[weekKey] = {};
-  data.orders[weekKey][nameLower] = {
-    schoolName: schoolName.trim(),
-    schoolEmail: schoolEmail.trim(),
-    week,
-    comment: comment || "",
-    submittedAt: new Date().toISOString(),
-  };
-  saveData(data);
-
-  let emailSent = false;
-  let emailError = null;
-  try {
-    await sendConfirmationEmail({ schoolEmail: schoolEmail.trim(), schoolName: schoolName.trim(), weekLabel, week, comment });
-    emailSent = true;
+    res.json({ ok: true, emailSent, emailError });
   } catch (e) {
-    emailError = e.message;
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
   }
-
-  res.json({ ok: true, emailSent, emailError });
 });
 
-// Renvoie la commande de l'école pour une semaine donnée (pour afficher le jour à rectifier).
-app.post("/api/orders/mine", (req, res) => {
-  const { schoolName, code, weekKey } = req.body || {};
-  if (!schoolName || !code || !weekKey) {
-    return res.status(400).json({ ok: false, error: "Informations manquantes." });
-  }
-  const nameLower = schoolName.trim().toLowerCase();
-  const data = loadData();
-  const hash = hashCode(code);
+app.post("/api/orders/mine", async (req, res) => {
+  try {
+    const { schoolName, code, weekKey } = req.body || {};
+    if (!schoolName || !code || !weekKey) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    const nameLower = schoolName.trim().toLowerCase();
+    const hash = hashCode(code);
+    const school = await getSchool(nameLower);
 
-  if (!data.schools[nameLower] || data.schools[nameLower].codeHash !== hash) {
-    return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
-  }
+    if (!school || school.code_hash !== hash) {
+      return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
+    }
 
-  const order = (data.orders[weekKey] || {})[nameLower] || null;
-  res.json({
-    ok: true,
-    order,
-    correctionOpen: isCorrectionWindowOpen(),
-    todayDayId: todayDayId(),
-    currentWeekKey: getISOWeekKeyForDate(new Date()),
-  });
+    const row = await getOrder(weekKey, nameLower);
+    const order = row
+      ? { schoolName: row.school_name, schoolEmail: row.school_email, week: row.week, comment: row.comment }
+      : null;
+
+    res.json({
+      ok: true,
+      order,
+      correctionOpen: isCorrectionWindowOpen(),
+      todayDayId: todayDayId(),
+      currentWeekKey: getISOWeekKeyForDate(new Date()),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
 });
 
-// Applique une rectification (+/-) sur le jour même, avant 9h15.
 app.post("/api/orders/correction", async (req, res) => {
-  const { schoolName, code, dayId, delta } = req.body || {};
-  if (!schoolName || !code || !dayId || !delta) {
-    return res.status(400).json({ ok: false, error: "Informations manquantes." });
-  }
-  if (!isCorrectionWindowOpen()) {
-    return res.status(403).json({ ok: false, error: "La fenêtre de rectification (avant 9h15) est fermée pour aujourd'hui." });
-  }
-  if (todayDayId() !== dayId) {
-    return res.status(403).json({ ok: false, error: "La rectification ne concerne que la journée en cours." });
-  }
-
-  const nameLower = schoolName.trim().toLowerCase();
-  const data = loadData();
-  const hash = hashCode(code);
-
-  if (!data.schools[nameLower] || data.schools[nameLower].codeHash !== hash) {
-    return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
-  }
-
-  const weekKey = getISOWeekKeyForDate(new Date());
-  const order = (data.orders[weekKey] || {})[nameLower];
-  if (!order) {
-    return res.status(404).json({ ok: false, error: "Aucune commande trouvée pour cette semaine." });
-  }
-
-  const dayValues = order.week[dayId] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
-  const newValues = {
-    soupe: Math.max(0, Number(dayValues.soupe || 0) + Number(delta.soupe || 0)),
-    maternelle: Math.max(0, Number(dayValues.maternelle || 0) + Number(delta.maternelle || 0)),
-    primaire: Math.max(0, Number(dayValues.primaire || 0) + Number(delta.primaire || 0)),
-    primairePlus: Math.max(0, Number(dayValues.primairePlus || 0) + Number(delta.primairePlus || 0)),
-  };
-  order.week[dayId] = newValues;
-  data.corrections.push({
-    timestamp: new Date().toISOString(),
-    schoolName: order.schoolName,
-    weekKey,
-    dayId,
-    delta,
-    newValues,
-  });
-  saveData(data);
-
-  const dayLabel = JOURS.find((j) => j.id === dayId)?.label || dayId;
-  let emailSent = false;
-  let emailError = null;
   try {
-    await sendCorrectionEmail({ schoolEmail: order.schoolEmail, schoolName: order.schoolName, dayLabel, delta, newValues });
-    emailSent = true;
-  } catch (e) {
-    emailError = e.message;
-  }
+    const { schoolName, code, dayId, delta } = req.body || {};
+    if (!schoolName || !code || !dayId || !delta) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    if (!isCorrectionWindowOpen()) {
+      return res.status(403).json({ ok: false, error: "La fenêtre de rectification (avant 9h15) est fermée pour aujourd'hui." });
+    }
+    if (todayDayId() !== dayId) {
+      return res.status(403).json({ ok: false, error: "La rectification ne concerne que la journée en cours." });
+    }
 
-  res.json({ ok: true, newValues, emailSent, emailError });
+    const nameLower = schoolName.trim().toLowerCase();
+    const hash = hashCode(code);
+    const school = await getSchool(nameLower);
+    if (!school || school.code_hash !== hash) {
+      return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
+    }
+
+    const weekKey = getISOWeekKeyForDate(new Date());
+    const row = await getOrder(weekKey, nameLower);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: "Aucune commande trouvée pour cette semaine." });
+    }
+
+    const week = row.week || emptyWeek();
+    const dayValues = week[dayId] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    const newValues = {
+      soupe: Math.max(0, Number(dayValues.soupe || 0) + Number(delta.soupe || 0)),
+      maternelle: Math.max(0, Number(dayValues.maternelle || 0) + Number(delta.maternelle || 0)),
+      primaire: Math.max(0, Number(dayValues.primaire || 0) + Number(delta.primaire || 0)),
+      primairePlus: Math.max(0, Number(dayValues.primairePlus || 0) + Number(delta.primairePlus || 0)),
+    };
+    week[dayId] = newValues;
+
+    await upsertOrder({
+      week_key: weekKey,
+      school_name_lower: nameLower,
+      week,
+    });
+
+    await logCorrection({
+      school_name: row.school_name,
+      week_key: weekKey,
+      day_id: dayId,
+      delta,
+      new_values: newValues,
+    });
+
+    const dayLabel = JOURS.find((j) => j.id === dayId)?.label || dayId;
+    let emailSent = false;
+    let emailError = null;
+    try {
+      await sendCorrectionEmail({ schoolEmail: row.school_email, schoolName: row.school_name, dayLabel, delta, newValues });
+      emailSent = true;
+    } catch (e) {
+      emailError = e.message;
+    }
+
+    res.json({ ok: true, newValues, emailSent, emailError });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
 });
 
-// Liste les mois pour lesquels des commandes existent (pour le sélecteur).
-app.get("/api/billing/months", (req, res) => {
-  const { code } = req.query;
-  if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
-    return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+app.get("/api/orders", async (req, res) => {
+  try {
+    const { weekKey, code } = req.query;
+    const expected = process.env.KITCHEN_CODE;
+    if (!expected) {
+      return res.status(500).json({ ok: false, error: "Code cuisine non configuré côté serveur." });
+    }
+    if (!code || code !== expected) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    const rows = weekKey ? await getOrdersForWeek(weekKey) : [];
+    const orders = rows.map((r) => ({ schoolName: r.school_name, week: r.week, comment: r.comment }));
+    res.json({ ok: true, orders });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
   }
-  const data = loadData();
-  const months = new Set();
-  Object.entries(data.orders).forEach(([weekKey, schools]) => {
-    Object.values(schools).forEach((order) => {
+});
+
+app.get("/api/billing/months", async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    const rows = await getAllOrders();
+    const months = new Set();
+    rows.forEach((r) => {
       JOURS.forEach((j) => {
-        const val = order.week[j.id];
+        const val = (r.week || {})[j.id];
         if (val && (val.soupe || val.maternelle || val.primaire || val.primairePlus)) {
-          months.add(monthKeyFor(dateForDay(weekKey, j.id)));
+          months.add(monthKeyFor(dateForDay(r.week_key, j.id)));
         }
       });
     });
-  });
-  res.json({ ok: true, months: Array.from(months).sort().reverse() });
+    res.json({ ok: true, months: Array.from(months).sort().reverse() });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
 });
 
-// Détail de facturation par école pour un mois donné, rectifications comprises
-// (les valeurs stockées sont déjà les valeurs finales, rectifications incluses).
-app.get("/api/billing", (req, res) => {
-  const { code, month } = req.query;
-  if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
-    return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
-  }
-  if (!month) {
-    return res.status(400).json({ ok: false, error: "Mois manquant." });
-  }
-  const data = loadData();
-  const bySchool = {};
+app.get("/api/billing", async (req, res) => {
+  try {
+    const { code, month } = req.query;
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!month) {
+      return res.status(400).json({ ok: false, error: "Mois manquant." });
+    }
+    const rows = await getAllOrders();
+    const bySchool = {};
 
-  Object.entries(data.orders).forEach(([weekKey, schools]) => {
-    Object.values(schools).forEach((order) => {
+    rows.forEach((r) => {
       JOURS.forEach((j) => {
-        const date = dateForDay(weekKey, j.id);
+        const date = dateForDay(r.week_key, j.id);
         if (monthKeyFor(date) !== month) return;
-        const val = order.week[j.id] || {};
-        const key = order.schoolName;
+        const val = (r.week || {})[j.id] || {};
+        const key = r.school_name;
         if (!bySchool[key]) {
-          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, jours: 0 };
+          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
         }
         bySchool[key].soupe += Number(val.soupe || 0);
         bySchool[key].maternelle += Number(val.maternelle || 0);
         bySchool[key].primaire += Number(val.primaire || 0);
         bySchool[key].primairePlus += Number(val.primairePlus || 0);
-        bySchool[key].jours += 1;
       });
     });
-  });
 
-  const correctionsThisMonth = data.corrections.filter((c) => {
-    const date = dateForDay(c.weekKey, c.dayId);
-    return monthKeyFor(date) === month;
-  });
+    const allCorrections = await getAllCorrections();
+    const correctionsThisMonth = allCorrections
+      .filter((c) => monthKeyFor(dateForDay(c.week_key, c.day_id)) === month)
+      .map((c) => ({
+        timestamp: c.timestamp,
+        schoolName: c.school_name,
+        weekKey: c.week_key,
+        dayId: c.day_id,
+        delta: c.delta,
+        newValues: c.new_values,
+      }));
 
-  const schools = Object.values(bySchool).sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
-  const totals = schools.reduce(
-    (acc, s) => ({
-      soupe: acc.soupe + s.soupe,
-      maternelle: acc.maternelle + s.maternelle,
-      primaire: acc.primaire + s.primaire,
-      primairePlus: acc.primairePlus + s.primairePlus,
-    }),
-    { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }
-  );
+    const schools = Object.values(bySchool).sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
+    const totals = schools.reduce(
+      (acc, s) => ({
+        soupe: acc.soupe + s.soupe,
+        maternelle: acc.maternelle + s.maternelle,
+        primaire: acc.primaire + s.primaire,
+        primairePlus: acc.primairePlus + s.primairePlus,
+      }),
+      { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }
+    );
 
-  res.json({ ok: true, schools, totals, corrections: correctionsThisMonth });
-});
-
-// Renvoie les commandes d'une semaine (pour la vue cuisine) — protégé par un code.
-app.get("/api/orders", (req, res) => {
-  const { weekKey, code } = req.query;
-  const expected = process.env.KITCHEN_CODE;
-  if (!expected) {
-    return res.status(500).json({ ok: false, error: "Code cuisine non configuré côté serveur." });
+    res.json({ ok: true, schools, totals, corrections: correctionsThisMonth });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
   }
-  if (!code || code !== expected) {
-    return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
-  }
-  const data = loadData();
-  const orders = weekKey ? data.orders[weekKey] || {} : {};
-  // On ne renvoie jamais les emails des écoles à cet écran.
-  const sanitized = Object.values(orders).map(({ schoolEmail, ...rest }) => rest);
-  res.json({ ok: true, orders: sanitized });
 });
 
 const PORT = process.env.PORT || 3000;
