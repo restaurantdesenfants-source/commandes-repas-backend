@@ -399,7 +399,11 @@ app.post("/api/orders/correction", async (req, res) => {
     await upsertOrder({
       week_key: weekKey,
       school_name_lower: nameLower,
+      school_name: row.school_name,
+      school_email: row.school_email,
       week,
+      comment: row.comment,
+      submitted_at: row.submitted_at,
     });
 
     await logCorrection({
@@ -467,7 +471,15 @@ app.post("/api/orders/admin-edit", async (req, res) => {
       }
     }
 
-    await upsertOrder({ week_key: weekKey, school_name_lower: nameLower, week });
+    await upsertOrder({
+      week_key: weekKey,
+      school_name_lower: nameLower,
+      school_name: row.school_name,
+      school_email: row.school_email,
+      week,
+      comment: row.comment,
+      submitted_at: row.submitted_at,
+    });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
