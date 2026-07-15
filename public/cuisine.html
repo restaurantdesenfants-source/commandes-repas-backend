@@ -47,10 +47,15 @@ const target = renderDeadlineBar();
 document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(target.monday)}`;
 
 let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
+let currentOrders = [];
+let editingSchool = null;
+let editValues = null;
 
-if (kitchenCode) {
-  tryLoad();
+function dayHeader(j) {
+  return `${j.label} <span style="opacity:.6;font-weight:400">${shortDateLabel(dateForDayOfWeek(target.monday, j.id))}</span>`;
 }
+
+if (kitchenCode) tryLoad();
 
 document.getElementById("btn-kitchen-login").addEventListener("click", () => {
   kitchenCode = document.getElementById("kitchen-code").value.trim();
@@ -81,7 +86,9 @@ async function load() {
     const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(target.monday))}&code=${encodeURIComponent(kitchenCode)}`);
     const data = await res.json();
     if (!data.ok) return false;
-    render(data.orders || []);
+    currentOrders = data.orders || [];
+    editingSchool = null;
+    render();
     return true;
   } catch (e) {
     content.innerHTML = `<p class="error-text">Impossible de charger les commandes : ${e.message}</p>`;
@@ -89,7 +96,8 @@ async function load() {
   }
 }
 
-function render(orders) {
+function render() {
+  const orders = currentOrders;
   const content = document.getElementById("cuisine-content");
 
   if (!orders.length) {
@@ -136,7 +144,7 @@ function render(orders) {
         <tbody>
           ${JOURS.map((j) => `
             <tr>
-              <td class="school-col">${j.label}</td>
+              <td class="school-col">${dayHeader(j)}</td>
               <td>${dayTotals[j.id].soupe}</td>
               <td>${dayTotals[j.id].maternelle}</td>
               <td>${dayTotals[j.id].primaire}</td>
@@ -149,7 +157,8 @@ function render(orders) {
     <p class="section-title">Détail par école (${orders.length})</p>
   `;
 
-  orders.forEach((o) => {
+  orders.forEach((o, idx) => {
+    const isEditing = editingSchool === o.schoolName;
     const schoolTotal = JOURS.reduce((s, j) => {
       const d = o.week[j.id] || {};
       return s + Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
@@ -168,17 +177,93 @@ function render(orders) {
             <tbody>
               ${JOURS.map((j) => {
                 const d = o.week[j.id] || {};
-                return `<tr><td class="school-col">${j.label}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td></tr>`;
+                if (isEditing) {
+                  return `<tr>
+                    <td class="school-col">${dayHeader(j)}</td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="soupe" value="${d.soupe || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="maternelle" value="${d.maternelle || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primaire" value="${d.primaire || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primairePlus" value="${d.primairePlus || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
+                  </tr>`;
+                }
+                return `<tr><td class="school-col">${dayHeader(j)}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td></tr>`;
               }).join("")}
             </tbody>
           </table>
         </div>
         ${o.comment ? `<p class="note-tag">💬 ${o.comment}</p>` : ""}
+        <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+          ${isEditing
+            ? `<button class="primary-btn" style="width:auto;padding:9px 16px" data-action="save" data-idx="${idx}">Enregistrer les modifications</button>
+               <button class="link-btn" data-action="cancel">Annuler</button>`
+            : `<button class="link-btn" data-action="edit" data-school="${o.schoolName}">✏️ Modifier les quantités</button>`
+          }
+        </div>
+        <p class="error-text" id="edit-error-${idx}" style="display:none"></p>
       </div>
     `;
   });
 
-  document.getElementById("cuisine-content").innerHTML = html;
+  content.innerHTML = html;
+  attachHandlers();
+}
+
+function attachHandlers() {
+  document.querySelectorAll('[data-action="edit"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      editingSchool = btn.dataset.school;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-action="cancel"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      editingSchool = null;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-action="save"]').forEach((btn) => {
+    btn.addEventListener("click", () => saveEdit(parseInt(btn.dataset.idx, 10)));
+  });
+}
+
+async function saveEdit(idx) {
+  const order = currentOrders[idx];
+  const inputs = document.querySelectorAll(".edit-input");
+  const updatedWeek = JSON.parse(JSON.stringify(order.week));
+  inputs.forEach((input) => {
+    const day = input.dataset.day;
+    const field = input.dataset.field;
+    const raw = input.value.replace(",", ".").trim();
+    const v = Math.max(0, parseFloat(raw) || 0);
+    if (!updatedWeek[day]) updatedWeek[day] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    updatedWeek[day][field] = v;
+  });
+
+  const errEl = document.getElementById(`edit-error-${idx}`);
+  errEl.style.display = "none";
+  try {
+    const res = await fetch("/api/orders/admin-edit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: kitchenCode,
+        schoolName: order.schoolName,
+        weekKey: weekKeyFor(target.monday),
+        week: updatedWeek,
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error || "Erreur lors de la modification.";
+      errEl.style.display = "block";
+      return;
+    }
+    editingSchool = null;
+    await load();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = "block";
+  }
 }
 
 document.getElementById("btn-refresh").addEventListener("click", tryLoad);
