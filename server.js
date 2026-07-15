@@ -427,6 +427,54 @@ app.post("/api/orders/correction", async (req, res) => {
   }
 });
 
+// Modification manuelle des quantités par la cuisine (ex. correction d'un bug signalé
+// par une école). Chaque changement est journalisé comme une rectification, pour
+// apparaître dans l'historique de facturation.
+app.post("/api/orders/admin-edit", async (req, res) => {
+  try {
+    const { code, schoolName, weekKey, week } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!schoolName || !weekKey || !week) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    const nameLower = schoolName.trim().toLowerCase();
+    const row = await getOrder(weekKey, nameLower);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: "Aucune commande trouvée pour cette école et cette semaine." });
+    }
+
+    const oldWeek = row.week || emptyWeek();
+    for (const j of JOURS) {
+      const oldV = oldWeek[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+      const newV = week[j.id] || oldV;
+      const delta = {
+        soupe: Number(newV.soupe || 0) - Number(oldV.soupe || 0),
+        maternelle: Number(newV.maternelle || 0) - Number(oldV.maternelle || 0),
+        primaire: Number(newV.primaire || 0) - Number(oldV.primaire || 0),
+        primairePlus: Number(newV.primairePlus || 0) - Number(oldV.primairePlus || 0),
+      };
+      const hasChange = Object.values(delta).some((v) => v !== 0);
+      if (hasChange) {
+        await logCorrection({
+          school_name: row.school_name,
+          week_key: weekKey,
+          day_id: j.id,
+          delta,
+          new_values: newV,
+        });
+      }
+    }
+
+    await upsertOrder({ week_key: weekKey, school_name_lower: nameLower, week });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
 app.get("/api/orders", async (req, res) => {
   try {
     const { weekKey, code } = req.query;
