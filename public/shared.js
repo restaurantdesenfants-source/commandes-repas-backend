@@ -97,6 +97,18 @@ function todayDayId() {
   return map[weekday] || null;
 }
 
+const DAY_OFFSET = { lundi: 0, mardi: 1, jeudi: 3, vendredi: 4 };
+
+function dateForDayOfWeek(monday, dayId) {
+  const d = new Date(monday);
+  d.setDate(monday.getDate() + (DAY_OFFSET[dayId] || 0));
+  return d;
+}
+
+function shortDateLabel(date) {
+  return date.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+}
+
 function fmtDeadline(d) {
   return d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }) + " à 15h";
 }
