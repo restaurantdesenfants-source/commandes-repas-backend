@@ -59,6 +59,48 @@ function todayDayId() {
   return map[weekday] || null;
 }
 
+// Heure actuelle à Bruxelles, en valeurs calendaires complètes (année/mois/jour/heure/minute).
+function brusselsNowFull() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Brussels",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const map = {};
+  parts.forEach((p) => (map[p.type] = p.value));
+  return {
+    year: parseInt(map.year, 10),
+    month: parseInt(map.month, 10),
+    day: parseInt(map.day, 10),
+    hour: parseInt(map.hour, 10),
+    minute: parseInt(map.minute, 10),
+  };
+}
+
+function toComparableKey({ year, month, day, hour, minute }) {
+  return year * 100000000 + month * 1000000 + day * 10000 + hour * 100 + minute;
+}
+
+// Un jour donné (dans une semaine donnée) reste rectifiable jusqu'à 9h15,
+// heure de Bruxelles, LE JOUR MÊME — pas seulement "aujourd'hui" : les jours
+// à venir dans la semaine restent ouverts jusqu'à leur propre échéance.
+function isDayCorrectionOpen(weekKey, dayId) {
+  const dayDate = dateForDay(weekKey, dayId);
+  const cutoff = toComparableKey({
+    year: dayDate.getUTCFullYear(),
+    month: dayDate.getUTCMonth() + 1,
+    day: dayDate.getUTCDate(),
+    hour: 9,
+    minute: 15,
+  });
+  const now = toComparableKey(brusselsNowFull());
+  return now <= cutoff;
+}
+
 function getISOWeekKeyForDate(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
@@ -402,11 +444,17 @@ app.post("/api/orders/mine", async (req, res) => {
       ? { schoolName: row.school_name, schoolEmail: row.school_email, week: row.week, comment: row.comment }
       : null;
 
+    const days = JOURS.map((j) => ({
+      id: j.id,
+      label: j.label,
+      editable: isDayCorrectionOpen(weekKey, j.id),
+      date: dateForDay(weekKey, j.id).toISOString(),
+    }));
+
     res.json({
       ok: true,
       order,
-      correctionOpen: isCorrectionWindowOpen(),
-      todayDayId: todayDayId(),
+      days,
       currentWeekKey: getISOWeekKeyForDate(new Date()),
     });
   } catch (e) {
@@ -421,11 +469,14 @@ app.post("/api/orders/correction", async (req, res) => {
     if (!schoolName || !code || !dayId || !delta) {
       return res.status(400).json({ ok: false, error: "Informations manquantes." });
     }
-    if (!isCorrectionWindowOpen()) {
-      return res.status(403).json({ ok: false, error: "La fenêtre de rectification (avant 9h15) est fermée pour aujourd'hui." });
+
+    const weekKey = getISOWeekKeyForDate(new Date());
+
+    if (!JOURS.some((j) => j.id === dayId)) {
+      return res.status(400).json({ ok: false, error: "Jour invalide." });
     }
-    if (todayDayId() !== dayId) {
-      return res.status(403).json({ ok: false, error: "La rectification ne concerne que la journée en cours." });
+    if (!isDayCorrectionOpen(weekKey, dayId)) {
+      return res.status(403).json({ ok: false, error: "La fenêtre de rectification (avant 9h15 le jour même) est fermée pour ce jour." });
     }
 
     const nameLower = schoolName.trim().toLowerCase();
@@ -435,7 +486,6 @@ app.post("/api/orders/correction", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
     }
 
-    const weekKey = getISOWeekKeyForDate(new Date());
     const row = await getOrder(weekKey, nameLower);
     if (!row) {
       return res.status(404).json({ ok: false, error: "Aucune commande trouvée pour cette semaine." });
