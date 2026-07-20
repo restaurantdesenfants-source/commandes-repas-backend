@@ -36,6 +36,20 @@
 
     <div id="billing-content" style="display:none"></div>
   </div>
+
+  <div class="card" id="directory-card" style="display:none;margin-top:20px">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow">Annuaire</p>
+        <h1>📇 Écoles</h1>
+      </div>
+      <button class="link-btn" id="btn-refresh-directory">↻ Actualiser</button>
+    </div>
+    <p class="help-text-small" style="margin-top:-10px;margin-bottom:16px">
+      Les codes d'accès sont chiffrés et ne peuvent jamais être affichés en clair — seule une réinitialisation est possible.
+    </p>
+    <div id="directory-content"><p class="help-text">Chargement…</p></div>
+  </div>
 </main>
 
 <script src="/shared.js"></script>
@@ -68,12 +82,74 @@ async function tryLoad() {
     months = data.months || [];
     document.getElementById("login-block").style.display = "none";
     document.getElementById("billing-content").style.display = "block";
+    document.getElementById("directory-card").style.display = "block";
     renderMonthPicker();
+    loadDirectory();
   } catch (e) {
     errEl.textContent = "Erreur de connexion, réessayez.";
     errEl.style.display = "block";
   }
 }
+
+async function loadDirectory() {
+  const el = document.getElementById("directory-content");
+  el.innerHTML = `<p class="help-text">Chargement…</p>`;
+  try {
+    const res = await fetch(`/api/schools?code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok || !data.schools.length) {
+      el.innerHTML = `<p class="help-text">Aucune école enregistrée pour l'instant.</p>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="school-col">École</th><th class="school-col">Email</th><th></th></tr></thead>
+          <tbody>
+            ${data.schools.map((s) => `
+              <tr>
+                <td class="school-col">${s.schoolName}</td>
+                <td class="school-col">${s.schoolEmail || "<span style='opacity:.5'>non renseigné</span>"}</td>
+                <td><button class="link-btn" data-reset="${s.schoolName}">Envoyer un nouveau code</button></td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+    document.querySelectorAll("[data-reset]").forEach((btn) => {
+      btn.addEventListener("click", () => resetCode(btn.dataset.reset, btn));
+    });
+  } catch (e) {
+    el.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+async function resetCode(schoolName, btn) {
+  if (!confirm(`Envoyer un nouveau code d'accès à "${schoolName}" par email ? L'ancien code cessera de fonctionner immédiatement.`)) return;
+  btn.textContent = "…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/schools/reset-code", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de l'envoi du nouveau code.");
+      btn.textContent = "Envoyer un nouveau code";
+      btn.disabled = false;
+      return;
+    }
+    btn.textContent = "Nouveau code envoyé ✓";
+  } catch (e) {
+    alert(e.message);
+    btn.textContent = "Envoyer un nouveau code";
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-refresh-directory").addEventListener("click", loadDirectory);
 
 function monthLabel(monthKey) {
   const [y, m] = monthKey.split("-").map(Number);
