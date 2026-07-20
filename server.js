@@ -175,6 +175,18 @@ async function setSchoolNewCode(nameLower, newCode) {
   if (error) throw error;
 }
 
+// Supprime définitivement une école : ses commandes, ses rectifications, et son
+// accès. Irréversible — pensé pour nettoyer des écoles de test, pas pour un usage
+// courant sur de vraies écoles.
+async function deleteSchool(nameLower, schoolName) {
+  const { error: e1 } = await supabase.from("orders").delete().eq("school_name_lower", nameLower);
+  if (e1) throw e1;
+  const { error: e2 } = await supabase.from("corrections").delete().ilike("school_name", schoolName);
+  if (e2) throw e2;
+  const { error: e3 } = await supabase.from("schools").delete().eq("id", nameLower);
+  if (e3) throw e3;
+}
+
 async function getOrder(weekKey, nameLower) {
   const { data, error } = await supabase
     .from("orders")
@@ -638,6 +650,30 @@ app.post("/api/schools/reset-code", async (req, res) => {
     await setSchoolNewCode(nameLower, newCode);
     await sendNewCodeEmail({ schoolEmail: school.school_email, schoolName: school.school_name, newCode });
 
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Supprime une école et tout son historique (commandes, rectifications).
+// Irréversible — prévu pour nettoyer des écoles de test.
+app.post("/api/schools/delete", async (req, res) => {
+  try {
+    const { code, schoolName } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!schoolName) {
+      return res.status(400).json({ ok: false, error: "Nom d'école manquant." });
+    }
+    const nameLower = schoolName.trim().toLowerCase();
+    const school = await getSchool(nameLower);
+    if (!school) {
+      return res.status(404).json({ ok: false, error: "École introuvable." });
+    }
+    await deleteSchool(nameLower, school.school_name);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
