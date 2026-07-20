@@ -110,8 +110,26 @@ async function getSchool(nameLower) {
   return data;
 }
 
-async function upsertSchool(nameLower, schoolName, codeHash) {
-  const { error } = await supabase.from("schools").upsert({ id: nameLower, school_name: schoolName, code_hash: codeHash });
+async function upsertSchool(nameLower, schoolName, codeHash, schoolEmail) {
+  const fields = { id: nameLower, school_name: schoolName, code_hash: codeHash };
+  if (schoolEmail) fields.school_email = schoolEmail;
+  const { error } = await supabase.from("schools").upsert(fields);
+  if (error) throw error;
+}
+
+async function getAllSchools() {
+  const { data, error } = await supabase.from("schools").select("id, school_name, school_email").order("school_name");
+  if (error) throw error;
+  return data;
+}
+
+function generateNewCode() {
+  return String(crypto.randomInt(100000, 999999)); // code à 6 chiffres
+}
+
+async function setSchoolNewCode(nameLower, newCode) {
+  const hash = hashCode(newCode);
+  const { error } = await supabase.from("schools").update({ code_hash: hash }).eq("id", nameLower);
   if (error) throw error;
 }
 
@@ -206,6 +224,38 @@ async function sendConfirmationEmail({ schoolEmail, schoolName, weekLabel, week,
   return res.json();
 }
 
+async function sendNewCodeEmail({ schoolEmail, schoolName, newCode }) {
+  const html = `
+    <p>Bonjour,</p>
+    <p>Votre code d'accès pour <strong>${schoolName}</strong> a été réinitialisé à votre demande.</p>
+    <p>Votre nouveau code d'accès est :</p>
+    <p style="font-size:22px;font-weight:bold;letter-spacing:2px;background:#f2efe5;padding:10px 16px;display:inline-block;border-radius:8px">${newCode}</p>
+    <p>Utilisez-le lors de votre prochaine connexion pour retrouver vos commandes.</p>
+    <p>Merci.</p>
+  `;
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "api-key": process.env.BREVO_API_KEY,
+    },
+    body: JSON.stringify({
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
+      to: [{ email: schoolEmail, name: schoolName }],
+      subject: `Nouveau code d'accès - ${schoolName}`,
+      htmlContent: html,
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Brevo a refusé l'envoi : ${errText}`);
+  }
+  return res.json();
+}
+
 async function sendCorrectionEmail({ schoolEmail, schoolName, dayLabel, delta, newValues }) {
   const fmtDelta = (v) => (v > 0 ? `+${v}` : `${v}`);
   const html = `
@@ -263,7 +313,7 @@ async function sendCorrectionEmail({ schoolEmail, schoolName, dayLabel, delta, n
 
 app.post("/api/access", async (req, res) => {
   try {
-    const { schoolName, code } = req.body || {};
+    const { schoolName, code, schoolEmail } = req.body || {};
     if (!schoolName || !code) {
       return res.status(400).json({ ok: false, error: "Nom d'école et code requis." });
     }
@@ -272,11 +322,16 @@ app.post("/api/access", async (req, res) => {
     const school = await getSchool(nameLower);
 
     if (school) {
+      // École déjà connue : le code doit correspondre, sans aucune exception,
+      // même juste après une réinitialisation (le nouveau code est alors déjà
+      // fixé et envoyé par email — il ne peut jamais être choisi librement ici).
       if (school.code_hash !== hash) {
         return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
       }
+      if (schoolEmail) await upsertSchool(nameLower, schoolName.trim(), hash, schoolEmail.trim());
     } else {
-      await upsertSchool(nameLower, schoolName.trim(), hash);
+      // Toute première commande de cette école : ce code devient son code d'accès.
+      await upsertSchool(nameLower, schoolName.trim(), hash, schoolEmail ? schoolEmail.trim() : null);
     }
     res.json({ ok: true });
   } catch (e) {
@@ -480,6 +535,59 @@ app.post("/api/orders/admin-edit", async (req, res) => {
       comment: row.comment,
       submitted_at: row.submitted_at,
     });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Annuaire des écoles (nom + email), pour la page Facturation.
+app.get("/api/schools", async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    const schools = await getAllSchools();
+    res.json({
+      ok: true,
+      schools: schools.map((s) => ({ schoolName: s.school_name, schoolEmail: s.school_email || null })),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Réinitialise le code d'accès d'une école (elle en choisira un nouveau à sa
+// prochaine connexion). Les codes eux-mêmes ne sont jamais récupérables : ils
+// sont enregistrés chiffrés (à sens unique), pas en clair.
+app.post("/api/schools/reset-code", async (req, res) => {
+  try {
+    const { code, schoolName } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!schoolName) {
+      return res.status(400).json({ ok: false, error: "Nom d'école manquant." });
+    }
+    const nameLower = schoolName.trim().toLowerCase();
+    const school = await getSchool(nameLower);
+    if (!school) {
+      return res.status(404).json({ ok: false, error: "École introuvable." });
+    }
+    if (!school.school_email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Aucun email connu pour cette école — impossible d'envoyer le nouveau code en sécurité. Demandez-lui de se connecter une fois avec son code habituel (son email se synchronisera automatiquement), puis réessayez.",
+      });
+    }
+
+    const newCode = generateNewCode();
+    await setSchoolNewCode(nameLower, newCode);
+    await sendNewCodeEmail({ schoolEmail: school.school_email, schoolName: school.school_name, newCode });
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
