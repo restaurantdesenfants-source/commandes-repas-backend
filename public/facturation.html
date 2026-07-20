@@ -101,21 +101,15 @@ async function loadDirectory() {
       el.innerHTML = `<p class="help-text">Aucune école enregistrée pour l'instant.</p>`;
       return;
     }
-    el.innerHTML = `
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th class="school-col">École</th><th class="school-col">Email</th><th></th></tr></thead>
-          <tbody>
-            ${data.schools.map((s) => `
-              <tr>
-                <td class="school-col">${s.schoolName}</td>
-                <td class="school-col">${s.schoolEmail || "<span style='opacity:.5'>non renseigné</span>"}</td>
-                <td><button class="link-btn" data-reset="${s.schoolName}">Envoyer un nouveau code</button></td>
-              </tr>`).join("")}
-          </tbody>
-        </table>
+    el.innerHTML = data.schools.map((s) => `
+      <div class="school-block">
+        <div class="school-block-head" style="margin-bottom:6px">
+          <span class="school-name">${s.schoolName}</span>
+        </div>
+        <p class="help-text-small" style="margin-top:0">${s.schoolEmail || "<span style='opacity:.5'>email non renseigné</span>"}</p>
+        <button class="primary-btn" style="width:auto;padding:9px 16px" data-reset="${s.schoolName}">Envoyer un nouveau code</button>
       </div>
-    `;
+    `).join("");
     document.querySelectorAll("[data-reset]").forEach((btn) => {
       btn.addEventListener("click", () => resetCode(btn.dataset.reset, btn));
     });
