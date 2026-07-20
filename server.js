@@ -187,6 +187,35 @@ async function deleteSchool(nameLower, schoolName) {
   if (e3) throw e3;
 }
 
+// Supprime les commandes d'une école qui concernent un mois donné (au moins un
+// jour de la semaine tombe dans ce mois), sans toucher à son compte/accès.
+async function deleteOrdersForSchoolMonth(schoolName, month) {
+  const { data, error } = await supabase.from("orders").select("id, week_key").ilike("school_name", schoolName);
+  if (error) throw error;
+  const idsToDelete = (data || [])
+    .filter((r) => JOURS.some((j) => monthKeyFor(dateForDay(r.week_key, j.id)) === month))
+    .map((r) => r.id);
+  if (idsToDelete.length) {
+    const { error: delErr } = await supabase.from("orders").delete().in("id", idsToDelete);
+    if (delErr) throw delErr;
+  }
+}
+
+async function deleteCorrectionById(id) {
+  const { error } = await supabase.from("corrections").delete().eq("id", id);
+  if (error) throw error;
+}
+
+async function deleteCorrectionsForMonth(month) {
+  const { data, error } = await supabase.from("corrections").select("id, week_key, day_id");
+  if (error) throw error;
+  const idsToDelete = (data || []).filter((c) => monthKeyFor(dateForDay(c.week_key, c.day_id)) === month).map((c) => c.id);
+  if (idsToDelete.length) {
+    const { error: delErr } = await supabase.from("corrections").delete().in("id", idsToDelete);
+    if (delErr) throw delErr;
+  }
+}
+
 async function getOrder(weekKey, nameLower) {
   const { data, error } = await supabase
     .from("orders")
@@ -681,6 +710,60 @@ app.post("/api/schools/delete", async (req, res) => {
   }
 });
 
+// Supprime les commandes d'une école pour un mois donné (garde son accès actif).
+app.post("/api/billing/delete-school-month", async (req, res) => {
+  try {
+    const { code, schoolName, month } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!schoolName || !month) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    await deleteOrdersForSchoolMonth(schoolName, month);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Supprime une seule rectification (juste sa ligne dans l'historique).
+app.post("/api/billing/delete-correction", async (req, res) => {
+  try {
+    const { code, id } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Identifiant manquant." });
+    }
+    await deleteCorrectionById(id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Supprime toutes les rectifications d'un mois donné, en une fois.
+app.post("/api/billing/delete-corrections-month", async (req, res) => {
+  try {
+    const { code, month } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!month) {
+      return res.status(400).json({ ok: false, error: "Mois manquant." });
+    }
+    await deleteCorrectionsForMonth(month);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
 app.get("/api/orders", async (req, res) => {
   try {
     const { weekKey, code } = req.query;
@@ -755,6 +838,7 @@ app.get("/api/billing", async (req, res) => {
     const correctionsThisMonth = allCorrections
       .filter((c) => monthKeyFor(dateForDay(c.week_key, c.day_id)) === month)
       .map((c) => ({
+        id: c.id,
         timestamp: c.timestamp,
         schoolName: c.school_name,
         weekKey: c.week_key,
