@@ -94,7 +94,7 @@ document.getElementById("btn-continue").addEventListener("click", async () => {
     const res = await fetch("/api/access", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ schoolName, code: accessCode }),
+      body: JSON.stringify({ schoolName, code: accessCode, schoolEmail }),
     });
     const data = await res.json();
     if (!data.ok) {
@@ -138,84 +138,119 @@ async function loadCorrectionCard() {
       body: JSON.stringify({ schoolName, code: accessCode, weekKey: weekKeyFor(getCurrentWeekMonday()) }),
     });
     const data = await res.json();
-    if (!data.ok || !data.order || !data.correctionOpen || !data.todayDayId) return;
+    if (!data.ok || !data.order || !data.days) return;
 
-    const dayId = data.todayDayId;
-    const dayLabel = JOURS.find((j) => j.id === dayId)?.label || dayId;
-    const current = data.order.week[dayId] || emptyDay();
-    let delta = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    const editableDays = data.days.filter((d) => d.editable);
+    if (!editableDays.length) return; // Plus rien n'est rectifiable cette semaine.
+
+    const deltas = {};
+    data.days.forEach((d) => {
+      if (d.editable) deltas[d.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    });
 
     function renderCorrectionCard() {
       box.innerHTML = `
         <div class="day-card" style="border-color:#c9a227">
-          <p class="day-card-title">Rectification pour aujourd'hui — ${dayLabel}</p>
-          <p class="help-text-small" style="margin-top:-8px">Ajoutez ou retirez des repas pour aujourd'hui uniquement, jusqu'à 9h15.</p>
-          <div class="field-grid" id="correction-fields"></div>
-          <p class="help-text-small" id="correction-preview"></p>
-          <button class="primary-btn" id="btn-send-correction" style="margin-top:10px">Envoyer la rectification</button>
-          <p id="correction-result" style="display:none"></p>
+          <p class="day-card-title">Rectification de la semaine en cours</p>
+          <p class="help-text-small" style="margin-top:-8px">
+            Chaque jour reste modifiable jusqu'à 9h15 le jour même. Passé cette heure, il se ferme automatiquement.
+          </p>
+          <div id="correction-days"></div>
+          <button class="primary-btn" id="btn-send-correction" style="margin-top:10px">Envoyer les rectifications</button>
+          <div id="correction-result"></div>
         </div>
       `;
-      const fieldsEl = document.getElementById("correction-fields");
-      CHAMPS.forEach((c) => {
-        const wrap = document.createElement("div");
-        wrap.className = "field-item";
-        wrap.innerHTML = `<label>${c.label}${c.unit ? ` (${c.unit})` : ""} — actuellement ${current[c.id]}</label>`;
-        const input = document.createElement("input");
-        input.type = "text";
-        input.inputMode = "decimal";
-        input.value = 0;
-        input.addEventListener("focus", () => input.select());
-        input.addEventListener("input", () => {
-          delta[c.id] = parseDecimal(input.value);
-          updatePreview();
+      const daysEl = document.getElementById("correction-days");
+      data.days.forEach((d) => {
+        const current = data.order.week[d.id] || emptyDay();
+        const dayBox = document.createElement("div");
+        dayBox.style.marginTop = "14px";
+        dayBox.style.paddingTop = "14px";
+        dayBox.style.borderTop = "1px solid " + "#ddd6c4";
+
+        if (!d.editable) {
+          dayBox.innerHTML = `<p class="help-text-small"><strong>${d.label}</strong> — clôturé (9h15 dépassées)</p>`;
+          daysEl.appendChild(dayBox);
+          return;
+        }
+
+        dayBox.innerHTML = `<p class="field-label" style="margin-bottom:10px">${d.label}</p>`;
+        const grid = document.createElement("div");
+        grid.className = "field-grid";
+        CHAMPS.forEach((c) => {
+          const wrap = document.createElement("div");
+          wrap.className = "field-item";
+          wrap.innerHTML = `<label>${c.label}${c.unit ? ` (${c.unit})` : ""} — actuellement ${current[c.id]}</label>`;
+          const input = document.createElement("input");
+          input.type = "text";
+          input.inputMode = "decimal";
+          input.value = 0;
+          input.addEventListener("focus", () => input.select());
+          input.addEventListener("input", () => {
+            deltas[d.id][c.id] = parseDecimal(input.value);
+            updatePreview(d.id);
+          });
+          wrap.appendChild(input);
+          grid.appendChild(wrap);
         });
-        wrap.appendChild(input);
-        fieldsEl.appendChild(wrap);
+        dayBox.appendChild(grid);
+        const preview = document.createElement("p");
+        preview.className = "help-text-small";
+        preview.id = `preview-${d.id}`;
+        dayBox.appendChild(preview);
+        daysEl.appendChild(dayBox);
+        updatePreview(d.id);
       });
-      document.getElementById("btn-send-correction").addEventListener("click", sendCorrection);
-      updatePreview();
+      document.getElementById("btn-send-correction").addEventListener("click", sendAllCorrections);
     }
 
-    function updatePreview() {
-      const preview = CHAMPS.map((c) => {
-        const nv = Math.max(0, Number(current[c.id] || 0) + Number(delta[c.id] || 0));
-        return `${c.label} : ${nv}`;
-      }).join(" · ");
-      document.getElementById("correction-preview").textContent = `Après rectification → ${preview}`;
+    function updatePreview(dayId) {
+      const current = data.order.week[dayId] || emptyDay();
+      const delta = deltas[dayId];
+      const preview = CHAMPS.map((c) => `${c.label} : ${Math.max(0, Number(current[c.id] || 0) + Number(delta[c.id] || 0))}`).join(" · ");
+      const el = document.getElementById(`preview-${dayId}`);
+      if (el) el.textContent = `Après rectification → ${preview}`;
     }
 
-    async function sendCorrection() {
-      const hasChange = Object.values(delta).some((v) => v !== 0);
-      if (!hasChange) return;
+    async function sendAllCorrections() {
+      const changedDays = Object.keys(deltas).filter((dayId) => Object.values(deltas[dayId]).some((v) => v !== 0));
+      if (!changedDays.length) return;
+
       const btn = document.getElementById("btn-send-correction");
       btn.disabled = true;
       btn.textContent = "Envoi…";
-      try {
-        const res2 = await fetch("/api/orders/correction", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ schoolName, code: accessCode, dayId, delta }),
-        });
-        const data2 = await res2.json();
-        const resultEl = document.getElementById("correction-result");
-        resultEl.style.display = "block";
-        if (!data2.ok) {
-          resultEl.className = "error-text";
-          resultEl.textContent = data2.error || "Erreur lors de la rectification.";
-        } else if (data2.emailSent) {
-          resultEl.className = "confirm-title";
-          resultEl.textContent = "✓ Rectification enregistrée, email de confirmation envoyé.";
-        } else {
-          resultEl.className = "error-text";
-          resultEl.textContent = `Rectification enregistrée, mais l'email a échoué : ${data2.emailError || "cause inconnue"}`;
+      const resultEl = document.getElementById("correction-result");
+      resultEl.innerHTML = "";
+
+      for (const dayId of changedDays) {
+        const dayLabel = JOURS.find((j) => j.id === dayId)?.label || dayId;
+        const line = document.createElement("p");
+        try {
+          const res2 = await fetch("/api/orders/correction", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ schoolName, code: accessCode, dayId, delta: deltas[dayId] }),
+          });
+          const data2 = await res2.json();
+          if (!data2.ok) {
+            line.className = "error-text";
+            line.textContent = `${dayLabel} : ${data2.error || "échec de la rectification"}`;
+          } else if (data2.emailSent) {
+            line.className = "confirm-title";
+            line.textContent = `✓ ${dayLabel} : rectifié, email envoyé`;
+          } else {
+            line.className = "error-text";
+            line.textContent = `${dayLabel} : rectifié, mais email échoué (${data2.emailError || "cause inconnue"})`;
+          }
+        } catch (e) {
+          line.className = "error-text";
+          line.textContent = `${dayLabel} : erreur réseau`;
         }
-        btn.textContent = "Envoyer la rectification";
-        btn.disabled = false;
-      } catch (e) {
-        btn.textContent = "Envoyer la rectification";
-        btn.disabled = false;
+        resultEl.appendChild(line);
       }
+
+      btn.textContent = "Envoyer les rectifications";
+      btn.disabled = false;
     }
 
     renderCorrectionCard();
