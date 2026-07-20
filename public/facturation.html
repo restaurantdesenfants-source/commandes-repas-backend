@@ -107,14 +107,46 @@ async function loadDirectory() {
           <span class="school-name">${s.schoolName}</span>
         </div>
         <p class="help-text-small" style="margin-top:0">${s.schoolEmail || "<span style='opacity:.5'>email non renseigné</span>"}</p>
-        <button class="primary-btn" style="width:auto;padding:9px 16px" data-reset="${s.schoolName}">Envoyer un nouveau code</button>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="primary-btn" style="width:auto;padding:9px 16px" data-reset="${s.schoolName}">Envoyer un nouveau code</button>
+          <button class="link-btn" style="color:#a3402e" data-delete="${s.schoolName}">🗑 Supprimer l'école</button>
+        </div>
       </div>
     `).join("");
     document.querySelectorAll("[data-reset]").forEach((btn) => {
       btn.addEventListener("click", () => resetCode(btn.dataset.reset, btn));
     });
+    document.querySelectorAll("[data-delete]").forEach((btn) => {
+      btn.addEventListener("click", () => deleteSchool(btn.dataset.delete, btn));
+    });
   } catch (e) {
     el.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+async function deleteSchool(schoolName, btn) {
+  if (!confirm(`Supprimer définitivement "${schoolName}" ? Ceci efface aussi toutes ses commandes et rectifications passées. Action irréversible.`)) return;
+  if (!confirm(`Dernière confirmation : "${schoolName}" et tout son historique seront perdus pour toujours. Continuer ?`)) return;
+  btn.textContent = "Suppression…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/schools/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de la suppression.");
+      btn.textContent = "🗑 Supprimer l'école";
+      btn.disabled = false;
+      return;
+    }
+    loadDirectory();
+  } catch (e) {
+    alert(e.message);
+    btn.textContent = "🗑 Supprimer l'école";
+    btn.disabled = false;
   }
 }
 
