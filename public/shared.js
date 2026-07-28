@@ -114,7 +114,7 @@ function fmtDeadline(d) {
 }
 
 function emptyDay() {
-  return { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+  return { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
 }
 
 function emptyWeek() {
