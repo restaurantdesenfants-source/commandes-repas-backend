@@ -29,6 +29,10 @@
       </div>
       <button class="link-btn" id="btn-refresh" style="display:none">↻ Actualiser</button>
     </div>
+    <div id="week-nav" style="display:none;margin-bottom:16px">
+      <button class="link-btn" id="btn-prev-week">◀ Semaine précédente</button>
+      <button class="link-btn" id="btn-this-week" style="display:none;margin-left:16px">Semaine actuelle ▶</button>
+    </div>
 
     <div id="login-block">
       <p class="help-text">Cette page est réservée à la cuisine. Entrez le code d'accès.</p>
@@ -44,7 +48,21 @@
 <script src="/shared.js"></script>
 <script>
 const target = renderDeadlineBar();
-document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(target.monday)}`;
+let weekOffset = 0; // 0 = semaine actuelle affichée, -1 = semaine précédente
+
+function displayedMonday() {
+  const d = new Date(target.monday);
+  d.setDate(d.getDate() + weekOffset * 7);
+  return d;
+}
+
+function updateWeekHeader() {
+  const monday = displayedMonday();
+  const label = weekOffset === 0 ? "" : " (semaine précédente)";
+  document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(monday)}${label}`;
+  document.getElementById("btn-this-week").style.display = weekOffset === 0 ? "none" : "inline";
+}
+updateWeekHeader();
 
 let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
 let currentOrders = [];
@@ -52,7 +70,7 @@ let editingSchool = null;
 let editValues = null;
 
 function dayHeader(j) {
-  return `${j.label} <span style="opacity:.6;font-weight:400">${shortDateLabel(dateForDayOfWeek(target.monday, j.id))}</span>`;
+  return `${j.label} <span style="opacity:.6;font-weight:400">${shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id))}</span>`;
 }
 
 if (kitchenCode) tryLoad();
@@ -61,6 +79,17 @@ document.getElementById("btn-kitchen-login").addEventListener("click", () => {
   kitchenCode = document.getElementById("kitchen-code").value.trim();
   if (!kitchenCode) return;
   tryLoad();
+});
+
+document.getElementById("btn-prev-week").addEventListener("click", () => {
+  weekOffset -= 1;
+  updateWeekHeader();
+  load();
+});
+document.getElementById("btn-this-week").addEventListener("click", () => {
+  weekOffset = 0;
+  updateWeekHeader();
+  load();
 });
 
 async function tryLoad() {
@@ -72,6 +101,7 @@ async function tryLoad() {
     document.getElementById("login-block").style.display = "none";
     document.getElementById("cuisine-content").style.display = "block";
     document.getElementById("btn-refresh").style.display = "inline-flex";
+    document.getElementById("week-nav").style.display = "block";
   } else {
     errEl.textContent = "Code cuisine incorrect.";
     errEl.style.display = "block";
@@ -83,7 +113,7 @@ async function load() {
   const content = document.getElementById("cuisine-content");
   content.innerHTML = `<p class="help-text">Chargement des commandes…</p>`;
   try {
-    const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(target.monday))}&code=${encodeURIComponent(kitchenCode)}`);
+    const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(displayedMonday()))}&code=${encodeURIComponent(kitchenCode)}`);
     const data = await res.json();
     if (!data.ok) return false;
     currentOrders = data.orders || [];
@@ -248,7 +278,7 @@ async function saveEdit(idx) {
       body: JSON.stringify({
         code: kitchenCode,
         schoolName: order.schoolName,
-        weekKey: weekKeyFor(target.monday),
+        weekKey: weekKeyFor(displayedMonday()),
         week: updatedWeek,
       }),
     });
