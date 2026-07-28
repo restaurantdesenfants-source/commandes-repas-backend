@@ -173,6 +173,12 @@ function render() {
     </div>
     <p class="total-row" style="margin-top:4px"><span>Total repas semaine</span><span class="total-value">${grandTotal}</span></p>
 
+    <p class="section-title">Fiche du jour (par école, à imprimer)</p>
+    <div id="day-sheet-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      ${JOURS.map((j) => `<button class="link-btn day-sheet-tab" data-day="${j.id}" style="border:1px solid #ddd6c4;border-radius:8px;padding:7px 12px">${j.label}</button>`).join("")}
+    </div>
+    <div id="day-sheet-preview"></div>
+
     <p class="section-title">Répartition par jour</p>
     <div class="table-scroll">
       <table>
@@ -260,6 +266,106 @@ function attachHandlers() {
   document.querySelectorAll('[data-action="save"]').forEach((btn) => {
     btn.addEventListener("click", () => saveEdit(parseInt(btn.dataset.idx, 10)));
   });
+  document.querySelectorAll(".day-sheet-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedSheetDay = btn.dataset.day;
+      renderDaySheetPreview();
+    });
+  });
+  if (selectedSheetDay) renderDaySheetPreview();
+}
+
+let selectedSheetDay = null;
+
+function renderDaySheetPreview() {
+  document.querySelectorAll(".day-sheet-tab").forEach((btn) => {
+    btn.style.background = btn.dataset.day === selectedSheetDay ? "#c9a227" : "transparent";
+    btn.style.color = btn.dataset.day === selectedSheetDay ? "#24302a" : "";
+  });
+
+  const j = JOURS.find((x) => x.id === selectedSheetDay);
+  const preview = document.getElementById("day-sheet-preview");
+  if (!j) {
+    preview.innerHTML = "";
+    return;
+  }
+
+  const rows = currentOrders
+    .map((o) => ({ name: o.schoolName, ...(o.week[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }) }))
+    .filter((r) => r.soupe || r.maternelle || r.primaire || r.primairePlus);
+
+  const totals = rows.reduce(
+    (acc, r) => ({
+      soupe: acc.soupe + Number(r.soupe || 0),
+      maternelle: acc.maternelle + Number(r.maternelle || 0),
+      primaire: acc.primaire + Number(r.primaire || 0),
+      primairePlus: acc.primairePlus + Number(r.primairePlus || 0),
+    }),
+    { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }
+  );
+
+  if (!rows.length) {
+    preview.innerHTML = `<p class="help-text">Aucune commande pour ${j.label.toLowerCase()}.</p>`;
+    return;
+  }
+
+  preview.innerHTML = `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="school-col">École</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr><td class="school-col">${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td></tr>`).join("")}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight:600;border-top:2px solid #24302a">
+            <td class="school-col">Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:12px" id="btn-print-day-sheet">🖨️ Imprimer cette fiche</button>
+  `;
+
+  document.getElementById("btn-print-day-sheet").addEventListener("click", () => printDaySheet(j, rows, totals));
+}
+
+function printDaySheet(j, rows, totals) {
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiche ${j.label} ${dateLabel}</title>
+      <style>
+        body { font-family: sans-serif; padding: 24px; color: #222; }
+        h1 { font-size: 20px; margin-bottom: 4px; }
+        p.sub { color: #666; margin-top: 0; margin-bottom: 24px; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+        th { background: #f2efe5; }
+        tfoot td { font-weight: bold; border-top: 2px solid #222; }
+        td:not(:first-child), th:not(:first-child) { text-align: center; }
+      </style>
+    </head>
+    <body>
+      <h1>Fiche de préparation — ${j.label} ${dateLabel}</h1>
+      <p class="sub">Générée le ${new Date().toLocaleString("fr-FR")}</p>
+      <table>
+        <thead><tr><th>École</th><th>Soupe (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr><td>${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td></tr>`).join("")}
+        </tbody>
+        <tfoot>
+          <tr><td>Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td></tr>
+        </tfoot>
+      </table>
+      <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
+    </body>
+    </html>
+  `);
+  win.document.close();
 }
 
 async function saveEdit(idx) {
