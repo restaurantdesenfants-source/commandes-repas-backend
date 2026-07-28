@@ -31,7 +31,8 @@
     </div>
     <div id="week-nav" style="display:none;margin-bottom:16px">
       <button class="link-btn" id="btn-prev-week">◀ Semaine précédente</button>
-      <button class="link-btn" id="btn-this-week" style="display:none;margin-left:16px">Semaine actuelle ▶</button>
+      <button class="link-btn" id="btn-next-week" style="margin-left:16px">Semaine suivante ▶</button>
+      <button class="link-btn" id="btn-this-week" style="display:none;margin-left:16px">↺ Revenir à cette semaine</button>
     </div>
 
     <div id="login-block">
@@ -48,17 +49,17 @@
 <script src="/shared.js"></script>
 <script>
 const target = renderDeadlineBar();
-let weekOffset = 0; // 0 = semaine actuelle affichée, -1 = semaine précédente
+let weekOffset = 0; // 0 = semaine EN COURS (celle servie maintenant), pas la semaine de commande future
 
 function displayedMonday() {
-  const d = new Date(target.monday);
+  const d = getCurrentWeekMonday();
   d.setDate(d.getDate() + weekOffset * 7);
   return d;
 }
 
 function updateWeekHeader() {
   const monday = displayedMonday();
-  const label = weekOffset === 0 ? "" : " (semaine précédente)";
+  const label = weekOffset === 0 ? " (semaine en cours)" : weekOffset < 0 ? " (semaine passée)" : " (à venir)";
   document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(monday)}${label}`;
   document.getElementById("btn-this-week").style.display = weekOffset === 0 ? "none" : "inline";
 }
@@ -83,6 +84,11 @@ document.getElementById("btn-kitchen-login").addEventListener("click", () => {
 
 document.getElementById("btn-prev-week").addEventListener("click", () => {
   weekOffset -= 1;
+  updateWeekHeader();
+  load();
+});
+document.getElementById("btn-next-week").addEventListener("click", () => {
+  weekOffset += 1;
   updateWeekHeader();
   load();
 });
