@@ -50,6 +50,7 @@
 <script>
 const target = renderDeadlineBar();
 let weekOffset = 0; // 0 = semaine EN COURS (celle servie maintenant), pas la semaine de commande future
+const SOUPE_INCLUSE_PAR_REPAS = 0.2; // litres inclus par repas maternel/primaire/primaire+ commandé
 
 function displayedMonday() {
   const d = getCurrentWeekMonday();
@@ -69,18 +70,30 @@ let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
 let currentOrders = [];
 let editingSchool = null;
 let selectedSheetDay = null;
-
-function emptyDayWithDessert() {
-  const d = emptyDay();
-  if (d.dessert === undefined) d.dessert = 0;
-  return d;
-}
 let menus = {
   lundi: { soupe: "", plat: "", dessert: "" },
   mardi: { soupe: "", plat: "", dessert: "" },
   jeudi: { soupe: "", plat: "", dessert: "" },
   vendredi: { soupe: "", plat: "", dessert: "" },
 };
+
+// Soupe incluse est TOUJOURS calculée : 0,2 L par repas maternel/primaire/primaire+
+// (en plus de la soupe commandée séparément).
+// Dessert est enregistré par défaut = 1 par repas, mais modifiable manuellement en
+// cuisine pour les suppléments (jamais visible ni modifiable côté école).
+function withDerived(d) {
+  const repas = Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
+  const soupeCommandee = Number(d.soupe || 0);
+  const soupeIncluse = Math.round(repas * SOUPE_INCLUSE_PAR_REPAS * 100) / 100;
+  return {
+    ...d,
+    repas,
+    dessert: d.dessert !== undefined && d.dessert !== null ? Number(d.dessert) : repas,
+    soupeCommandee,
+    soupeIncluse,
+    soupeTotale: Math.round((soupeCommandee + soupeIncluse) * 100) / 100,
+  };
+}
 
 function dayHeader(j) {
   return `${j.label} <span style="opacity:.6;font-weight:400">${shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id))}</span>`;
@@ -136,7 +149,7 @@ async function load() {
     if (!data.ok) return false;
     currentOrders = (data.orders || []).map((o) => ({
       ...o,
-      week: Object.fromEntries(JOURS.map((j) => [j.id, { ...emptyDayWithDessert(), ...(o.week[j.id] || {}) }])),
+      week: Object.fromEntries(JOURS.map((j) => [j.id, { ...emptyDay(), ...(o.week[j.id] || {}) }])),
     }));
     editingSchool = null;
     render();
@@ -160,36 +173,42 @@ function render() {
 
   const dayTotals = {};
   JOURS.forEach((j) => {
-    dayTotals[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+    dayTotals[j.id] = { soupeCommandee: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
     orders.forEach((o) => {
-      const d = o.week[j.id] || {};
-      dayTotals[j.id].soupe += Number(d.soupe || 0);
+      const d = withDerived(o.week[j.id] || {});
+      dayTotals[j.id].soupeCommandee += d.soupeCommandee;
+      dayTotals[j.id].soupeIncluse += d.soupeIncluse;
       dayTotals[j.id].maternelle += Number(d.maternelle || 0);
       dayTotals[j.id].primaire += Number(d.primaire || 0);
       dayTotals[j.id].primairePlus += Number(d.primairePlus || 0);
-      dayTotals[j.id].dessert += Number(d.dessert || 0);
+      dayTotals[j.id].dessert += d.dessert;
     });
   });
 
-  const weekTotals = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+  const weekTotals = { soupeCommandee: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
   JOURS.forEach((j) => {
-    weekTotals.soupe += dayTotals[j.id].soupe;
+    weekTotals.soupeCommandee += dayTotals[j.id].soupeCommandee;
+    weekTotals.soupeIncluse += dayTotals[j.id].soupeIncluse;
     weekTotals.maternelle += dayTotals[j.id].maternelle;
     weekTotals.primaire += dayTotals[j.id].primaire;
     weekTotals.primairePlus += dayTotals[j.id].primairePlus;
     weekTotals.dessert += dayTotals[j.id].dessert;
   });
   const grandTotal = weekTotals.maternelle + weekTotals.primaire + weekTotals.primairePlus;
+  const round2 = (n) => Math.round(n * 100) / 100;
 
   let html = `
-    <div class="stat-grid" style="grid-template-columns:repeat(5,1fr)">
-      <div class="stat-card"><span class="stat-value">${weekTotals.soupe} L</span><span class="stat-label">Soupe</span></div>
+    <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat-card"><span class="stat-value">${round2(weekTotals.soupeCommandee)} L</span><span class="stat-label">Soupe commandée</span></div>
+      <div class="stat-card"><span class="stat-value">${round2(weekTotals.soupeIncluse)} L</span><span class="stat-label">Soupe incluse (0,2L/repas)</span></div>
+      <div class="stat-card"><span class="stat-value">${round2(weekTotals.soupeCommandee + weekTotals.soupeIncluse)} L</span><span class="stat-label">Soupe totale</span></div>
       <div class="stat-card"><span class="stat-value">${weekTotals.maternelle}</span><span class="stat-label">Maternelle</span></div>
       <div class="stat-card"><span class="stat-value">${weekTotals.primaire}</span><span class="stat-label">Primaire</span></div>
       <div class="stat-card"><span class="stat-value">${weekTotals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
-      <div class="stat-card"><span class="stat-value">${weekTotals.dessert}</span><span class="stat-label">Dessert</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.dessert}</span><span class="stat-label">Dessert (1/repas)</span></div>
     </div>
     <p class="total-row" style="margin-top:4px"><span>Total repas semaine</span><span class="total-value">${grandTotal}</span></p>
+    <p class="help-text-small" style="margin-top:-6px">Dessert et soupe incluse sont calculés automatiquement (1 dessert et 0,2 L de soupe par repas maternel/primaire/primaire+), pas saisis.</p>
 
     <p class="section-title">Fiches à imprimer</p>
     <div id="day-sheet-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
@@ -200,12 +219,13 @@ function render() {
     <p class="section-title">Répartition par jour</p>
     <div class="table-scroll">
       <table>
-        <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <thead><tr><th class="school-col">Jour</th><th>Soupe cmd.</th><th>Soupe incl.</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
           ${JOURS.map((j) => `
             <tr>
               <td class="school-col">${dayHeader(j)}</td>
-              <td>${dayTotals[j.id].soupe}</td>
+              <td>${round2(dayTotals[j.id].soupeCommandee)}</td>
+              <td>${round2(dayTotals[j.id].soupeIncluse)}</td>
               <td>${dayTotals[j.id].maternelle}</td>
               <td>${dayTotals[j.id].primaire}</td>
               <td>${dayTotals[j.id].primairePlus}</td>
@@ -220,40 +240,46 @@ function render() {
 
   orders.forEach((o, idx) => {
     const isEditing = editingSchool === o.schoolName;
-    const schoolTotal = JOURS.reduce((s, j) => {
-      const d = o.week[j.id] || {};
-      return s + Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
-    }, 0);
-    const schoolSoupe = JOURS.reduce((s, j) => s + Number((o.week[j.id] || {}).soupe || 0), 0);
+    let schoolTotal = 0;
+    let schoolSoupeCmd = 0;
+    let schoolSoupeIncl = 0;
+    JOURS.forEach((j) => {
+      const d = withDerived(o.week[j.id] || {});
+      schoolTotal += d.repas;
+      schoolSoupeCmd += d.soupeCommandee;
+      schoolSoupeIncl += d.soupeIncluse;
+    });
 
     html += `
       <div class="school-block">
         <div class="school-block-head">
           <span class="school-name">${o.schoolName}</span>
-          <span class="school-totals">${schoolTotal} repas · ${schoolSoupe} L soupe</span>
+          <span class="school-totals">${schoolTotal} repas · ${round2(schoolSoupeCmd)} L cmd + ${round2(schoolSoupeIncl)} L incluse</span>
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th class="school-col">Jour</th><th>Soupe</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+            <thead><tr><th class="school-col">Jour</th><th>Soupe cmd.</th><th>Soupe incl.</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
             <tbody>
               ${JOURS.map((j) => {
-                const d = o.week[j.id] || {};
+                const d = withDerived(o.week[j.id] || {});
                 if (isEditing) {
                   const inputStyle = "width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px";
                   return `<tr>
                     <td class="school-col">${dayHeader(j)}</td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="soupe" value="${d.soupe || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="soupe" value="${d.soupeCommandee}" style="${inputStyle}" /></td>
+                    <td style="opacity:.65">${round2(d.soupeIncluse)}</td>
                     <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="maternelle" value="${d.maternelle || 0}" style="${inputStyle}" /></td>
                     <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primaire" value="${d.primaire || 0}" style="${inputStyle}" /></td>
                     <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primairePlus" value="${d.primairePlus || 0}" style="${inputStyle}" /></td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="dessert" value="${d.dessert || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="dessert" value="${d.dessert}" style="${inputStyle}" /></td>
                   </tr>`;
                 }
-                return `<tr><td class="school-col">${dayHeader(j)}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td><td>${d.dessert || 0}</td></tr>`;
+                return `<tr><td class="school-col">${dayHeader(j)}</td><td>${round2(d.soupeCommandee)}</td><td>${round2(d.soupeIncluse)}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td><td>${d.dessert}</td></tr>`;
               }).join("")}
             </tbody>
           </table>
         </div>
+        ${isEditing ? `<p class="help-text-small">Soupe incluse se recalcule automatiquement. Dessert est pré-rempli (1/repas) mais modifiable pour les suppléments.</p>` : ""}
         ${o.comment ? `<p class="note-tag">💬 ${o.comment}</p>` : ""}
         <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
           ${isEditing
@@ -309,19 +335,21 @@ function renderDaySheetPreview() {
     return;
   }
 
+  const round2 = (n) => Math.round(n * 100) / 100;
   const rows = currentOrders
-    .map((o) => ({ name: o.schoolName, ...(o.week[j.id] || emptyDayWithDessert()) }))
-    .filter((r) => r.soupe || r.maternelle || r.primaire || r.primairePlus || r.dessert);
+    .map((o) => ({ name: o.schoolName, ...withDerived(o.week[j.id] || {}) }))
+    .filter((r) => r.soupeCommandee || r.maternelle || r.primaire || r.primairePlus);
 
   const totals = rows.reduce(
     (acc, r) => ({
-      soupe: acc.soupe + Number(r.soupe || 0),
+      soupeCommandee: acc.soupeCommandee + r.soupeCommandee,
+      soupeIncluse: acc.soupeIncluse + r.soupeIncluse,
       maternelle: acc.maternelle + Number(r.maternelle || 0),
       primaire: acc.primaire + Number(r.primaire || 0),
       primairePlus: acc.primairePlus + Number(r.primairePlus || 0),
-      dessert: acc.dessert + Number(r.dessert || 0),
+      dessert: acc.dessert + r.dessert,
     }),
-    { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 }
+    { soupeCommandee: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 }
   );
 
   const m = menus[j.id];
@@ -345,13 +373,13 @@ function renderDaySheetPreview() {
     <p class="section-title" style="border-top:none;padding-top:6px">Fiche générale — toutes les écoles</p>
     <div class="table-scroll">
       <table>
-        <thead><tr><th class="school-col">École</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <thead><tr><th class="school-col">École</th><th>Soupe cmd.</th><th>Soupe incl.</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
-          ${rows.map((r) => `<tr><td class="school-col">${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td><td>${r.dessert}</td></tr>`).join("")}
+          ${rows.map((r) => `<tr><td class="school-col">${r.name}</td><td>${round2(r.soupeCommandee)}</td><td>${round2(r.soupeIncluse)}</td><td>${r.maternelle || 0}</td><td>${r.primaire || 0}</td><td>${r.primairePlus || 0}</td><td>${r.dessert}</td></tr>`).join("")}
         </tbody>
         <tfoot>
           <tr style="font-weight:600;border-top:2px solid #24302a">
-            <td class="school-col">Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td>
+            <td class="school-col">Total</td><td>${round2(totals.soupeCommandee)}</td><td>${round2(totals.soupeIncluse)}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td>
           </tr>
         </tfoot>
       </table>
@@ -384,6 +412,7 @@ function renderDaySheetPreview() {
 }
 
 function printGeneralSheet(j, rows, totals) {
+  const round2 = (n) => Math.round(n * 100) / 100;
   const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
   const win = window.open("", "_blank");
   win.document.write(`
@@ -396,8 +425,8 @@ function printGeneralSheet(j, rows, totals) {
         body { font-family: sans-serif; padding: 24px; color: #222; }
         h1 { font-size: 20px; margin-bottom: 4px; }
         p.sub { color: #666; margin-top: 0; margin-bottom: 24px; }
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th, td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { border: 1px solid #ccc; padding: 7px 8px; text-align: left; }
         th { background: #f2efe5; }
         tfoot td { font-weight: bold; border-top: 2px solid #222; }
         td:not(:first-child), th:not(:first-child) { text-align: center; }
@@ -405,14 +434,14 @@ function printGeneralSheet(j, rows, totals) {
     </head>
     <body>
       <h1>Fiche de préparation — ${j.label} ${dateLabel}</h1>
-      <p class="sub">Générée le ${new Date().toLocaleString("fr-FR")}</p>
+      <p class="sub">Générée le ${new Date().toLocaleString("fr-FR")} — soupe incluse et dessert calculés automatiquement (0,2 L et 1 par repas)</p>
       <table>
-        <thead><tr><th>École</th><th>Soupe (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <thead><tr><th>École</th><th>Soupe cmd. (L)</th><th>Soupe incl. (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
-          ${rows.map((r) => `<tr><td>${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td><td>${r.dessert}</td></tr>`).join("")}
+          ${rows.map((r) => `<tr><td>${r.name}</td><td>${round2(r.soupeCommandee)}</td><td>${round2(r.soupeIncluse)}</td><td>${r.maternelle || 0}</td><td>${r.primaire || 0}</td><td>${r.primairePlus || 0}</td><td>${r.dessert}</td></tr>`).join("")}
         </tbody>
         <tfoot>
-          <tr><td>Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td></tr>
+          <tr><td>Total</td><td>${round2(totals.soupeCommandee)}</td><td>${round2(totals.soupeIncluse)}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td></tr>
         </tfoot>
       </table>
       <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
@@ -423,6 +452,7 @@ function printGeneralSheet(j, rows, totals) {
 }
 
 function printIndividualSheet(j, row) {
+  const round2 = (n) => Math.round(n * 100) / 100;
   const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
   const m = menus[j.id];
   const smileyRow = (label) => `
@@ -445,8 +475,8 @@ function printIndividualSheet(j, row) {
         h1 { font-size: 21px; margin-bottom: 2px; }
         h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; }
         p.sub { color: #666; margin-top: 0; margin-bottom: 20px; }
-        table { width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 10px; }
-        th, td { border: 1px solid #ccc; padding: 8px 10px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
+        th, td { border: 1px solid #ccc; padding: 8px 8px; }
         th { background: #f2efe5; text-align: center; }
         td:not(:first-child) { text-align: center; }
         .menu-box { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; background: #fafafa; }
@@ -467,9 +497,9 @@ function printIndividualSheet(j, row) {
 
       <h2>Quantités</h2>
       <table>
-        <thead><tr><th>Soupe (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <thead><tr><th>Soupe cmd. (L)</th><th>Soupe incl. (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
-          <tr><td>${row.soupe}</td><td>${row.maternelle}</td><td>${row.primaire}</td><td>${row.primairePlus}</td><td>${row.dessert}</td></tr>
+          <tr><td>${round2(row.soupeCommandee)}</td><td>${round2(row.soupeIncluse)}</td><td>${row.maternelle || 0}</td><td>${row.primaire || 0}</td><td>${row.primairePlus || 0}</td><td>${row.dessert}</td></tr>
         </tbody>
       </table>
 
@@ -496,7 +526,7 @@ async function saveEdit(idx) {
     const field = input.dataset.field;
     const raw = input.value.replace(",", ".").trim();
     const v = Math.max(0, parseFloat(raw) || 0);
-    if (!updatedWeek[day]) updatedWeek[day] = emptyDayWithDessert();
+    if (!updatedWeek[day]) updatedWeek[day] = emptyDay();
     updatedWeek[day][field] = v;
   });
 
