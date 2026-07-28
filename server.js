@@ -269,18 +269,26 @@ async function getAllCorrections() {
   return data;
 }
 
-// Suppléments dessert : facturés manuellement par école et par mois, indépendants
-// des commandes normales, jamais visibles ni gérés côté école.
+// Suppléments dessert : historique d'entrées facturées manuellement par école et
+// par mois, indépendant des commandes normales, jamais visible ni géré côté école.
+// Chaque entrée peut être annulée individuellement (suppression de la ligne).
 async function getDessertSupplementsForMonth(month) {
-  const { data, error } = await supabase.from("dessert_supplements").select("school_name, quantity").eq("month", month);
+  const { data, error } = await supabase
+    .from("dessert_supplements")
+    .select("*")
+    .eq("month", month)
+    .order("created_at", { ascending: false });
   if (error) throw error;
   return data;
 }
 
-async function upsertDessertSupplement(schoolName, month, quantity) {
-  const { error } = await supabase
-    .from("dessert_supplements")
-    .upsert({ school_name: schoolName, month, quantity, updated_at: new Date().toISOString() }, { onConflict: "school_name,month" });
+async function addDessertSupplementEntry(schoolName, month, quantity, note) {
+  const { error } = await supabase.from("dessert_supplements").insert({ school_name: schoolName, month, quantity, note: note || null });
+  if (error) throw error;
+}
+
+async function deleteDessertSupplementEntry(id) {
+  const { error } = await supabase.from("dessert_supplements").delete().eq("id", id);
   if (error) throw error;
 }
 
@@ -801,16 +809,37 @@ app.post("/api/billing/delete-corrections-month", async (req, res) => {
 // école, un mois donné. Totalement indépendant des commandes normales.
 app.post("/api/billing/dessert-supplement", async (req, res) => {
   try {
-    const { code, schoolName, month, quantity } = req.body || {};
+    const { code, schoolName, month, quantity, note } = req.body || {};
     if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
       return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
     }
-    if (!schoolName || !month || quantity === undefined) {
+    if (!schoolName || !month || !quantity) {
       return res.status(400).json({ ok: false, error: "Informations manquantes." });
     }
-    const q = Math.max(0, Math.round(Number(quantity) || 0));
-    await upsertDessertSupplement(schoolName.trim(), month, q);
-    res.json({ ok: true, quantity: q });
+    const q = Math.round(Number(quantity) || 0);
+    if (!q) {
+      return res.status(400).json({ ok: false, error: "La quantité doit être différente de zéro." });
+    }
+    await addDessertSupplementEntry(schoolName.trim(), month, q, note);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Annule (supprime) une entrée précise de l'historique des suppléments dessert.
+app.post("/api/billing/dessert-supplement/delete", async (req, res) => {
+  try {
+    const { code, id } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "Identifiant manquant." });
+    }
+    await deleteDessertSupplementEntry(id);
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -878,21 +907,30 @@ app.get("/api/billing", async (req, res) => {
         const val = (r.week || {})[j.id] || {};
         const key = r.school_name;
         if (!bySchool[key]) {
-          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessertSupplement: 0 };
+          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 };
         }
+        const repas = Number(val.maternelle || 0) + Number(val.primaire || 0) + Number(val.primairePlus || 0);
         bySchool[key].soupe += Number(val.soupe || 0);
         bySchool[key].maternelle += Number(val.maternelle || 0);
         bySchool[key].primaire += Number(val.primaire || 0);
         bySchool[key].primairePlus += Number(val.primairePlus || 0);
+        bySchool[key].dessert += Math.max(Number(val.dessert || 0), repas);
       });
     });
 
     const supplements = await getDessertSupplementsForMonth(month);
-    supplements.forEach((s) => {
-      if (!bySchool[s.school_name]) {
-        bySchool[s.school_name] = { schoolName: s.school_name, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessertSupplement: 0 };
+    const dessertSupplementEntries = supplements.map((s) => ({
+      id: s.id,
+      schoolName: s.school_name,
+      quantity: s.quantity,
+      note: s.note,
+      timestamp: s.created_at,
+    }));
+    dessertSupplementEntries.forEach((s) => {
+      if (!bySchool[s.schoolName]) {
+        bySchool[s.schoolName] = { schoolName: s.schoolName, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 };
       }
-      bySchool[s.school_name].dessertSupplement = s.quantity;
+      bySchool[s.schoolName].dessertSupplement += s.quantity;
     });
 
     const allCorrections = await getAllCorrections();
@@ -915,12 +953,13 @@ app.get("/api/billing", async (req, res) => {
         maternelle: acc.maternelle + s.maternelle,
         primaire: acc.primaire + s.primaire,
         primairePlus: acc.primairePlus + s.primairePlus,
+        dessert: acc.dessert + s.dessert,
         dessertSupplement: acc.dessertSupplement + (s.dessertSupplement || 0),
       }),
-      { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessertSupplement: 0 }
+      { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 }
     );
 
-    res.json({ ok: true, schools, totals, corrections: correctionsThisMonth });
+    res.json({ ok: true, schools, totals, corrections: correctionsThisMonth, dessertSupplementEntries });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
