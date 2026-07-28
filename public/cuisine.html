@@ -68,7 +68,19 @@ updateWeekHeader();
 let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
 let currentOrders = [];
 let editingSchool = null;
-let editValues = null;
+let selectedSheetDay = null;
+
+function emptyDayWithDessert() {
+  const d = emptyDay();
+  if (d.dessert === undefined) d.dessert = 0;
+  return d;
+}
+let menus = {
+  lundi: { soupe: "", plat: "", dessert: "" },
+  mardi: { soupe: "", plat: "", dessert: "" },
+  jeudi: { soupe: "", plat: "", dessert: "" },
+  vendredi: { soupe: "", plat: "", dessert: "" },
+};
 
 function dayHeader(j) {
   return `${j.label} <span style="opacity:.6;font-weight:400">${shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id))}</span>`;
@@ -122,7 +134,10 @@ async function load() {
     const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(displayedMonday()))}&code=${encodeURIComponent(kitchenCode)}`);
     const data = await res.json();
     if (!data.ok) return false;
-    currentOrders = data.orders || [];
+    currentOrders = (data.orders || []).map((o) => ({
+      ...o,
+      week: Object.fromEntries(JOURS.map((j) => [j.id, { ...emptyDayWithDessert(), ...(o.week[j.id] || {}) }])),
+    }));
     editingSchool = null;
     render();
     return true;
@@ -145,35 +160,38 @@ function render() {
 
   const dayTotals = {};
   JOURS.forEach((j) => {
-    dayTotals[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    dayTotals[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
     orders.forEach((o) => {
       const d = o.week[j.id] || {};
       dayTotals[j.id].soupe += Number(d.soupe || 0);
       dayTotals[j.id].maternelle += Number(d.maternelle || 0);
       dayTotals[j.id].primaire += Number(d.primaire || 0);
       dayTotals[j.id].primairePlus += Number(d.primairePlus || 0);
+      dayTotals[j.id].dessert += Number(d.dessert || 0);
     });
   });
 
-  const weekTotals = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+  const weekTotals = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
   JOURS.forEach((j) => {
     weekTotals.soupe += dayTotals[j.id].soupe;
     weekTotals.maternelle += dayTotals[j.id].maternelle;
     weekTotals.primaire += dayTotals[j.id].primaire;
     weekTotals.primairePlus += dayTotals[j.id].primairePlus;
+    weekTotals.dessert += dayTotals[j.id].dessert;
   });
   const grandTotal = weekTotals.maternelle + weekTotals.primaire + weekTotals.primairePlus;
 
   let html = `
-    <div class="stat-grid">
+    <div class="stat-grid" style="grid-template-columns:repeat(5,1fr)">
       <div class="stat-card"><span class="stat-value">${weekTotals.soupe} L</span><span class="stat-label">Soupe</span></div>
       <div class="stat-card"><span class="stat-value">${weekTotals.maternelle}</span><span class="stat-label">Maternelle</span></div>
       <div class="stat-card"><span class="stat-value">${weekTotals.primaire}</span><span class="stat-label">Primaire</span></div>
       <div class="stat-card"><span class="stat-value">${weekTotals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.dessert}</span><span class="stat-label">Dessert</span></div>
     </div>
     <p class="total-row" style="margin-top:4px"><span>Total repas semaine</span><span class="total-value">${grandTotal}</span></p>
 
-    <p class="section-title">Fiche du jour (par école, à imprimer)</p>
+    <p class="section-title">Fiches à imprimer</p>
     <div id="day-sheet-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
       ${JOURS.map((j) => `<button class="link-btn day-sheet-tab" data-day="${j.id}" style="border:1px solid #ddd6c4;border-radius:8px;padding:7px 12px">${j.label}</button>`).join("")}
     </div>
@@ -182,7 +200,7 @@ function render() {
     <p class="section-title">Répartition par jour</p>
     <div class="table-scroll">
       <table>
-        <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
           ${JOURS.map((j) => `
             <tr>
@@ -191,6 +209,7 @@ function render() {
               <td>${dayTotals[j.id].maternelle}</td>
               <td>${dayTotals[j.id].primaire}</td>
               <td>${dayTotals[j.id].primairePlus}</td>
+              <td>${dayTotals[j.id].dessert}</td>
             </tr>`).join("")}
         </tbody>
       </table>
@@ -215,20 +234,22 @@ function render() {
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th class="school-col">Jour</th><th>Soupe</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+            <thead><tr><th class="school-col">Jour</th><th>Soupe</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
             <tbody>
               ${JOURS.map((j) => {
                 const d = o.week[j.id] || {};
                 if (isEditing) {
+                  const inputStyle = "width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px";
                   return `<tr>
                     <td class="school-col">${dayHeader(j)}</td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="soupe" value="${d.soupe || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="maternelle" value="${d.maternelle || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primaire" value="${d.primaire || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primairePlus" value="${d.primairePlus || 0}" style="width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="soupe" value="${d.soupe || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="maternelle" value="${d.maternelle || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primaire" value="${d.primaire || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primairePlus" value="${d.primairePlus || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="dessert" value="${d.dessert || 0}" style="${inputStyle}" /></td>
                   </tr>`;
                 }
-                return `<tr><td class="school-col">${dayHeader(j)}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td></tr>`;
+                return `<tr><td class="school-col">${dayHeader(j)}</td><td>${d.soupe || 0}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td><td>${d.dessert || 0}</td></tr>`;
               }).join("")}
             </tbody>
           </table>
@@ -275,8 +296,6 @@ function attachHandlers() {
   if (selectedSheetDay) renderDaySheetPreview();
 }
 
-let selectedSheetDay = null;
-
 function renderDaySheetPreview() {
   document.querySelectorAll(".day-sheet-tab").forEach((btn) => {
     btn.style.background = btn.dataset.day === selectedSheetDay ? "#c9a227" : "transparent";
@@ -291,8 +310,8 @@ function renderDaySheetPreview() {
   }
 
   const rows = currentOrders
-    .map((o) => ({ name: o.schoolName, ...(o.week[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }) }))
-    .filter((r) => r.soupe || r.maternelle || r.primaire || r.primairePlus);
+    .map((o) => ({ name: o.schoolName, ...(o.week[j.id] || emptyDayWithDessert()) }))
+    .filter((r) => r.soupe || r.maternelle || r.primaire || r.primairePlus || r.dessert);
 
   const totals = rows.reduce(
     (acc, r) => ({
@@ -300,9 +319,12 @@ function renderDaySheetPreview() {
       maternelle: acc.maternelle + Number(r.maternelle || 0),
       primaire: acc.primaire + Number(r.primaire || 0),
       primairePlus: acc.primairePlus + Number(r.primairePlus || 0),
+      dessert: acc.dessert + Number(r.dessert || 0),
     }),
-    { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }
+    { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 }
   );
+
+  const m = menus[j.id];
 
   if (!rows.length) {
     preview.innerHTML = `<p class="help-text">Aucune commande pour ${j.label.toLowerCase()}.</p>`;
@@ -310,26 +332,58 @@ function renderDaySheetPreview() {
   }
 
   preview.innerHTML = `
+    <div class="day-card">
+      <p class="day-card-title" style="margin-bottom:10px">Menu du ${j.label.toLowerCase()}</p>
+      <div class="field-grid" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:4px">
+        <div class="field-item"><label>Soupe</label><input type="text" id="menu-soupe" value="${m.soupe}" placeholder="ex. Potage carottes" /></div>
+        <div class="field-item"><label>Plat</label><input type="text" id="menu-plat" value="${m.plat}" placeholder="ex. Boulettes sauce tomate" /></div>
+        <div class="field-item"><label>Dessert</label><input type="text" id="menu-dessert" value="${m.dessert}" placeholder="ex. Compote de pommes" /></div>
+      </div>
+      <p class="help-text-small" style="margin-top:8px">Ce menu sera repris sur les fiches imprimées de ce jour.</p>
+    </div>
+
+    <p class="section-title" style="border-top:none;padding-top:6px">Fiche générale — toutes les écoles</p>
     <div class="table-scroll">
       <table>
-        <thead><tr><th class="school-col">École</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <thead><tr><th class="school-col">École</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
-          ${rows.map((r) => `<tr><td class="school-col">${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td></tr>`).join("")}
+          ${rows.map((r) => `<tr><td class="school-col">${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td><td>${r.dessert}</td></tr>`).join("")}
         </tbody>
         <tfoot>
           <tr style="font-weight:600;border-top:2px solid #24302a">
-            <td class="school-col">Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td>
+            <td class="school-col">Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td>
           </tr>
         </tfoot>
       </table>
     </div>
-    <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:12px" id="btn-print-day-sheet">🖨️ Imprimer cette fiche</button>
+    <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:12px" id="btn-print-general">🖨️ Imprimer la fiche générale</button>
+
+    <p class="section-title">Fiches individuelles — une par école</p>
+    <p class="help-text-small" style="margin-top:-6px">Avec menu, quantités et cases d'appréciation à cocher par l'école.</p>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${rows.map((r) => `
+        <div style="display:flex;justify-content:space-between;align-items:center;border:1px solid #ddd6c4;border-radius:9px;padding:10px 14px">
+          <span style="font-weight:500">${r.name}</span>
+          <button class="link-btn" data-print-individual="${r.name}">🖨️ Imprimer</button>
+        </div>
+      `).join("")}
+    </div>
   `;
 
-  document.getElementById("btn-print-day-sheet").addEventListener("click", () => printDaySheet(j, rows, totals));
+  document.getElementById("menu-soupe").addEventListener("input", (e) => (menus[j.id].soupe = e.target.value));
+  document.getElementById("menu-plat").addEventListener("input", (e) => (menus[j.id].plat = e.target.value));
+  document.getElementById("menu-dessert").addEventListener("input", (e) => (menus[j.id].dessert = e.target.value));
+
+  document.getElementById("btn-print-general").addEventListener("click", () => printGeneralSheet(j, rows, totals));
+  document.querySelectorAll("[data-print-individual]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = rows.find((r) => r.name === btn.dataset.printIndividual);
+      printIndividualSheet(j, row);
+    });
+  });
 }
 
-function printDaySheet(j, rows, totals) {
+function printGeneralSheet(j, rows, totals) {
   const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
   const win = window.open("", "_blank");
   win.document.write(`
@@ -337,7 +391,7 @@ function printDaySheet(j, rows, totals) {
     <html lang="fr">
     <head>
       <meta charset="UTF-8" />
-      <title>Fiche ${j.label} ${dateLabel}</title>
+      <title>Fiche générale ${j.label} ${dateLabel}</title>
       <style>
         body { font-family: sans-serif; padding: 24px; color: #222; }
         h1 { font-size: 20px; margin-bottom: 4px; }
@@ -353,14 +407,79 @@ function printDaySheet(j, rows, totals) {
       <h1>Fiche de préparation — ${j.label} ${dateLabel}</h1>
       <p class="sub">Générée le ${new Date().toLocaleString("fr-FR")}</p>
       <table>
-        <thead><tr><th>École</th><th>Soupe (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th></tr></thead>
+        <thead><tr><th>École</th><th>Soupe (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
         <tbody>
-          ${rows.map((r) => `<tr><td>${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td></tr>`).join("")}
+          ${rows.map((r) => `<tr><td>${r.name}</td><td>${r.soupe}</td><td>${r.maternelle}</td><td>${r.primaire}</td><td>${r.primairePlus}</td><td>${r.dessert}</td></tr>`).join("")}
         </tbody>
         <tfoot>
-          <tr><td>Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td></tr>
+          <tr><td>Total</td><td>${totals.soupe}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td></tr>
         </tfoot>
       </table>
+      <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function printIndividualSheet(j, row) {
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const m = menus[j.id];
+  const smileyRow = (label) => `
+    <tr>
+      <td style="text-align:left;font-weight:500">${label}</td>
+      <td style="font-size:22px">☐ 😊</td>
+      <td style="font-size:22px">☐ 😐</td>
+      <td style="font-size:22px">☐ 😞</td>
+    </tr>
+  `;
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiche ${row.name} — ${j.label} ${dateLabel}</title>
+      <style>
+        body { font-family: sans-serif; padding: 28px; color: #222; }
+        h1 { font-size: 21px; margin-bottom: 2px; }
+        h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; }
+        p.sub { color: #666; margin-top: 0; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 10px; }
+        th, td { border: 1px solid #ccc; padding: 8px 10px; }
+        th { background: #f2efe5; text-align: center; }
+        td:not(:first-child) { text-align: center; }
+        .menu-box { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; background: #fafafa; }
+        .menu-box p { margin: 4px 0; }
+        .appr-table td { text-align: center; }
+        .appr-table td:first-child { text-align: left; }
+      </style>
+    </head>
+    <body>
+      <h1>Fiche de livraison — ${row.name}</h1>
+      <p class="sub">${j.label} ${dateLabel} — générée le ${new Date().toLocaleString("fr-FR")}</p>
+
+      <div class="menu-box">
+        <p><strong>Soupe :</strong> ${m.soupe || "—"}</p>
+        <p><strong>Plat :</strong> ${m.plat || "—"}</p>
+        <p><strong>Dessert :</strong> ${m.dessert || "—"}</p>
+      </div>
+
+      <h2>Quantités</h2>
+      <table>
+        <thead><tr><th>Soupe (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <tbody>
+          <tr><td>${row.soupe}</td><td>${row.maternelle}</td><td>${row.primaire}</td><td>${row.primairePlus}</td><td>${row.dessert}</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Appréciation (à remplir par l'école)</h2>
+      <table class="appr-table">
+        ${smileyRow("Quantité")}
+        ${smileyRow("Chaleur")}
+        ${smileyRow("Appréciation générale")}
+      </table>
+
       <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
     </body>
     </html>
@@ -377,7 +496,7 @@ async function saveEdit(idx) {
     const field = input.dataset.field;
     const raw = input.value.replace(",", ".").trim();
     const v = Math.max(0, parseFloat(raw) || 0);
-    if (!updatedWeek[day]) updatedWeek[day] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    if (!updatedWeek[day]) updatedWeek[day] = emptyDayWithDessert();
     updatedWeek[day][field] = v;
   });
 
