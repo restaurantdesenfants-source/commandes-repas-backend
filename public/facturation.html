@@ -235,6 +235,7 @@ function renderMonth(data) {
       <div class="stat-card"><span class="stat-value">${data.totals.maternelle}</span><span class="stat-label">Maternelle</span></div>
       <div class="stat-card"><span class="stat-value">${data.totals.primaire}</span><span class="stat-label">Primaire</span></div>
       <div class="stat-card"><span class="stat-value">${data.totals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.dessertSupplement || 0}</span><span class="stat-label">Suppléments dessert</span></div>
     </div>
     <p class="total-row" style="margin-top:4px"><span>Total repas du mois (toutes écoles)</span><span class="total-value">${grandTotal}</span></p>
 
@@ -252,6 +253,13 @@ function renderMonth(data) {
         <p class="help-text-small" style="margin-top:0">
           Maternelle : ${s.maternelle} · Primaire : ${s.primaire} · Primaire + : ${s.primairePlus}
         </p>
+        <div style="display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap">
+          <label class="field-label" style="margin-bottom:0">Suppléments dessert facturés</label>
+          <input type="number" min="0" step="1" value="${s.dessertSupplement || 0}" data-supplement-school="${s.schoolName}"
+            style="width:70px;padding:6px 8px;border-radius:7px;border:1px solid #ddd6c4;font-family:'IBM Plex Mono',monospace" />
+          <button class="link-btn" data-save-supplement="${s.schoolName}">Enregistrer</button>
+          <span class="help-text-small" id="supplement-status-${s.schoolName.replace(/\s+/g, "-")}" style="margin:0"></span>
+        </div>
         <button class="link-btn" style="color:#a3402e" data-delete-school-month="${s.schoolName}">
           🗑 Supprimer les commandes de ce mois pour cette école
         </button>
@@ -295,6 +303,9 @@ function renderMonth(data) {
   });
   const btnAll = document.getElementById("btn-delete-all-corrections");
   if (btnAll) btnAll.addEventListener("click", deleteAllCorrections);
+  document.querySelectorAll("[data-save-supplement]").forEach((btn) => {
+    btn.addEventListener("click", () => saveDessertSupplement(btn.dataset.saveSupplement));
+  });
 }
 
 async function deleteSchoolMonth(schoolName, btn) {
@@ -359,6 +370,29 @@ async function deleteAllCorrections() {
     loadMonth();
   } catch (e) {
     alert(e.message);
+  }
+}
+
+async function saveDessertSupplement(schoolName) {
+  const input = document.querySelector(`[data-supplement-school="${schoolName}"]`);
+  const statusEl = document.getElementById(`supplement-status-${schoolName.replace(/\s+/g, "-")}`);
+  const quantity = Math.max(0, parseInt(input.value, 10) || 0);
+  statusEl.textContent = "Enregistrement…";
+  try {
+    const res = await fetch("/api/billing/dessert-supplement", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName, month: selectedMonth, quantity }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error || "Erreur.";
+      return;
+    }
+    statusEl.textContent = "✓ Enregistré";
+    setTimeout(() => (statusEl.textContent = ""), 2500);
+  } catch (e) {
+    statusEl.textContent = e.message;
   }
 }
 </script>
