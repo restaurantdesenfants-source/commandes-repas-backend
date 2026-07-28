@@ -145,7 +145,7 @@ async function loadCorrectionCard() {
 
     const deltas = {};
     data.days.forEach((d) => {
-      if (d.editable) deltas[d.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+      if (d.editable) deltas[d.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
     });
 
     function renderCorrectionCard() {
