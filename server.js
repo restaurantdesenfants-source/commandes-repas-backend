@@ -138,10 +138,10 @@ function monthKeyFor(date) {
 
 function emptyWeek() {
   return {
-    lundi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
-    mardi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
-    jeudi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
-    vendredi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 },
+    lundi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 },
+    mardi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 },
+    jeudi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 },
+    vendredi: { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 },
   };
 }
 
@@ -533,12 +533,13 @@ app.post("/api/orders/correction", async (req, res) => {
     }
 
     const week = row.week || emptyWeek();
-    const dayValues = week[dayId] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    const dayValues = week[dayId] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
     const newValues = {
       soupe: Math.max(0, Number(dayValues.soupe || 0) + Number(delta.soupe || 0)),
       maternelle: Math.max(0, Number(dayValues.maternelle || 0) + Number(delta.maternelle || 0)),
       primaire: Math.max(0, Number(dayValues.primaire || 0) + Number(delta.primaire || 0)),
       primairePlus: Math.max(0, Number(dayValues.primairePlus || 0) + Number(delta.primairePlus || 0)),
+      dessert: Math.max(0, Number(dayValues.dessert || 0) + Number(delta.dessert || 0)),
     };
     week[dayId] = newValues;
 
@@ -597,13 +598,14 @@ app.post("/api/orders/admin-edit", async (req, res) => {
 
     const oldWeek = row.week || emptyWeek();
     for (const j of JOURS) {
-      const oldV = oldWeek[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+      const oldV = oldWeek[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
       const newV = week[j.id] || oldV;
       const delta = {
         soupe: Number(newV.soupe || 0) - Number(oldV.soupe || 0),
         maternelle: Number(newV.maternelle || 0) - Number(oldV.maternelle || 0),
         primaire: Number(newV.primaire || 0) - Number(oldV.primaire || 0),
         primairePlus: Number(newV.primairePlus || 0) - Number(oldV.primairePlus || 0),
+        dessert: Number(newV.dessert || 0) - Number(oldV.dessert || 0),
       };
       const hasChange = Object.values(delta).some((v) => v !== 0);
       if (hasChange) {
@@ -794,7 +796,7 @@ app.get("/api/billing/months", async (req, res) => {
     rows.forEach((r) => {
       JOURS.forEach((j) => {
         const val = (r.week || {})[j.id];
-        if (val && (val.soupe || val.maternelle || val.primaire || val.primairePlus)) {
+        if (val && (val.soupe || val.maternelle || val.primaire || val.primairePlus || val.dessert)) {
           months.add(monthKeyFor(dateForDay(r.week_key, j.id)));
         }
       });
