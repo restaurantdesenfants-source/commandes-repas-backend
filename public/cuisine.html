@@ -79,16 +79,19 @@ let menus = {
 
 // Soupe incluse est TOUJOURS calculée : 0,2 L par repas maternel/primaire/primaire+
 // (en plus de la soupe commandée séparément).
-// Dessert est enregistré par défaut = 1 par repas, mais modifiable manuellement en
-// cuisine pour les suppléments (jamais visible ni modifiable côté école).
+// Dessert vaut au minimum 1 par repas (recalculé à l'affichage, y compris pour les
+// commandes passées avant l'ajout de ce calcul) ; un chiffre plus élevé enregistré
+// manuellement en cuisine (supplément) est toujours respecté puisqu'il ne peut
+// jamais être inférieur à ce minimum.
 function withDerived(d) {
   const repas = Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
   const soupeCommandee = Number(d.soupe || 0);
   const soupeIncluse = Math.round(repas * SOUPE_INCLUSE_PAR_REPAS * 100) / 100;
+  const storedDessert = d.dessert !== undefined && d.dessert !== null ? Number(d.dessert) : 0;
   return {
     ...d,
     repas,
-    dessert: d.dessert !== undefined && d.dessert !== null ? Number(d.dessert) : repas,
+    dessert: Math.max(storedDessert, repas),
     soupeCommandee,
     soupeIncluse,
     soupeTotale: Math.round((soupeCommandee + soupeIncluse) * 100) / 100,
