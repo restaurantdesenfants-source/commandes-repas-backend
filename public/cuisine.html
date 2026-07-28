@@ -391,12 +391,19 @@ function renderDaySheetPreview() {
 
     <p class="section-title">Fiches individuelles — une par école</p>
     <p class="help-text-small" style="margin-top:-6px">Avec menu, quantités et cases d'appréciation à cocher par l'école.</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px">
+      <button class="link-btn" id="btn-toggle-all-schools">Tout sélectionner</button>
+      <button class="primary-btn" style="width:auto;padding:9px 16px" id="btn-print-selection">🖨️ Imprimer la sélection (<span id="selection-count">0</span>)</button>
+    </div>
     <div style="display:flex;flex-direction:column;gap:8px">
       ${rows.map((r) => `
-        <div style="display:flex;justify-content:space-between;align-items:center;border:1px solid #ddd6c4;border-radius:9px;padding:10px 14px">
-          <span style="font-weight:500">${r.name}</span>
-          <button class="link-btn" data-print-individual="${r.name}">🖨️ Imprimer</button>
-        </div>
+        <label style="display:flex;justify-content:space-between;align-items:center;border:1px solid #ddd6c4;border-radius:9px;padding:10px 14px;cursor:pointer">
+          <span style="display:flex;align-items:center;gap:10px">
+            <input type="checkbox" class="school-select-checkbox" data-school="${r.name}" style="width:17px;height:17px;accent-color:#c9a227" />
+            <span style="font-weight:500">${r.name}</span>
+          </span>
+          <button class="link-btn" data-print-individual="${r.name}" onclick="event.stopPropagation()">🖨️ Imprimer seule</button>
+        </label>
       `).join("")}
     </div>
   `;
@@ -411,6 +418,27 @@ function renderDaySheetPreview() {
       const row = rows.find((r) => r.name === btn.dataset.printIndividual);
       printIndividualSheet(j, row);
     });
+  });
+
+  const checkboxes = document.querySelectorAll(".school-select-checkbox");
+  function updateSelectionCount() {
+    const n = document.querySelectorAll(".school-select-checkbox:checked").length;
+    document.getElementById("selection-count").textContent = n;
+  }
+  checkboxes.forEach((cb) => cb.addEventListener("change", updateSelectionCount));
+
+  document.getElementById("btn-toggle-all-schools").addEventListener("click", (e) => {
+    const allChecked = Array.from(checkboxes).every((cb) => cb.checked);
+    checkboxes.forEach((cb) => (cb.checked = !allChecked));
+    e.target.textContent = allChecked ? "Tout sélectionner" : "Tout désélectionner";
+    updateSelectionCount();
+  });
+
+  document.getElementById("btn-print-selection").addEventListener("click", () => {
+    const selectedNames = Array.from(document.querySelectorAll(".school-select-checkbox:checked")).map((cb) => cb.dataset.school);
+    if (!selectedNames.length) return;
+    const selectedRows = rows.filter((r) => selectedNames.includes(r.name));
+    printMultipleIndividualSheets(j, selectedRows);
   });
 }
 
@@ -454,10 +482,8 @@ function printGeneralSheet(j, rows, totals) {
   win.document.close();
 }
 
-function printIndividualSheet(j, row) {
+function individualSheetBody(j, row, m, dateLabel, pageBreak) {
   const round2 = (n) => Math.round(n * 100) / 100;
-  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
-  const m = menus[j.id];
   const smileyRow = (label) => `
     <tr>
       <td style="text-align:left;font-weight:500">${label}</td>
@@ -466,29 +492,8 @@ function printIndividualSheet(j, row) {
       <td style="font-size:22px">☐ 😞</td>
     </tr>
   `;
-  const win = window.open("", "_blank");
-  win.document.write(`
-    <!DOCTYPE html>
-    <html lang="fr">
-    <head>
-      <meta charset="UTF-8" />
-      <title>Fiche ${row.name} — ${j.label} ${dateLabel}</title>
-      <style>
-        body { font-family: sans-serif; padding: 28px; color: #222; }
-        h1 { font-size: 21px; margin-bottom: 2px; }
-        h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; }
-        p.sub { color: #666; margin-top: 0; margin-bottom: 20px; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
-        th, td { border: 1px solid #ccc; padding: 8px 8px; }
-        th { background: #f2efe5; text-align: center; }
-        td:not(:first-child) { text-align: center; }
-        .menu-box { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; background: #fafafa; }
-        .menu-box p { margin: 4px 0; }
-        .appr-table td { text-align: center; }
-        .appr-table td:first-child { text-align: left; }
-      </style>
-    </head>
-    <body>
+  return `
+    <div style="${pageBreak ? "page-break-after: always;" : ""}">
       <h1>Fiche de livraison — ${row.name}</h1>
       <p class="sub">${j.label} ${dateLabel} — générée le ${new Date().toLocaleString("fr-FR")}</p>
 
@@ -512,7 +517,60 @@ function printIndividualSheet(j, row) {
         ${smileyRow("Chaleur")}
         ${smileyRow("Appréciation générale")}
       </table>
+    </div>
+  `;
+}
 
+const SHEET_STYLE = `
+  body { font-family: sans-serif; padding: 28px; color: #222; }
+  h1 { font-size: 21px; margin-bottom: 2px; }
+  h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; }
+  p.sub { color: #666; margin-top: 0; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
+  th, td { border: 1px solid #ccc; padding: 8px 8px; }
+  th { background: #f2efe5; text-align: center; }
+  td:not(:first-child) { text-align: center; }
+  .menu-box { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; background: #fafafa; }
+  .menu-box p { margin: 4px 0; }
+  .appr-table td { text-align: center; }
+  .appr-table td:first-child { text-align: left; }
+`;
+
+function printIndividualSheet(j, row) {
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const m = menus[j.id];
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiche ${row.name} — ${j.label} ${dateLabel}</title>
+      <style>${SHEET_STYLE}</style>
+    </head>
+    <body>
+      ${individualSheetBody(j, row, m, dateLabel, false)}
+      <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function printMultipleIndividualSheets(j, rows) {
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const m = menus[j.id];
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiches individuelles — ${j.label} ${dateLabel} (${rows.length} écoles)</title>
+      <style>${SHEET_STYLE}</style>
+    </head>
+    <body>
+      ${rows.map((row, i) => individualSheetBody(j, row, m, dateLabel, i < rows.length - 1)).join("")}
       <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
     </body>
     </html>
