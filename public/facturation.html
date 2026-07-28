@@ -228,6 +228,7 @@ function renderMonth(data) {
   }
 
   const grandTotal = data.totals.maternelle + data.totals.primaire + data.totals.primairePlus;
+  const entries = data.dessertSupplementEntries || [];
 
   let html = `
     <div class="stat-grid">
@@ -235,6 +236,7 @@ function renderMonth(data) {
       <div class="stat-card"><span class="stat-value">${data.totals.maternelle}</span><span class="stat-label">Maternelle</span></div>
       <div class="stat-card"><span class="stat-value">${data.totals.primaire}</span><span class="stat-label">Primaire</span></div>
       <div class="stat-card"><span class="stat-value">${data.totals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.dessert || 0}</span><span class="stat-label">Dessert</span></div>
       <div class="stat-card"><span class="stat-value">${data.totals.dessertSupplement || 0}</span><span class="stat-label">Suppléments dessert</span></div>
     </div>
     <p class="total-row" style="margin-top:4px"><span>Total repas du mois (toutes écoles)</span><span class="total-value">${grandTotal}</span></p>
@@ -244,6 +246,8 @@ function renderMonth(data) {
 
   data.schools.forEach((s) => {
     const total = s.maternelle + s.primaire + s.primairePlus;
+    const schoolEntries = entries.filter((e) => e.schoolName === s.schoolName);
+    const safeId = s.schoolName.replace(/\s+/g, "-");
     html += `
       <div class="school-block">
         <div class="school-block-head">
@@ -251,16 +255,32 @@ function renderMonth(data) {
           <span class="school-totals">${total} repas · ${s.soupe} L soupe</span>
         </div>
         <p class="help-text-small" style="margin-top:0">
-          Maternelle : ${s.maternelle} · Primaire : ${s.primaire} · Primaire + : ${s.primairePlus}
+          Maternelle : ${s.maternelle} · Primaire : ${s.primaire} · Primaire + : ${s.primairePlus} · Dessert : ${s.dessert || 0}
         </p>
-        <div style="display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap">
-          <label class="field-label" style="margin-bottom:0">Suppléments dessert facturés</label>
-          <input type="number" min="0" step="1" value="${s.dessertSupplement || 0}" data-supplement-school="${s.schoolName}"
-            style="width:70px;padding:6px 8px;border-radius:7px;border:1px solid #ddd6c4;font-family:'IBM Plex Mono',monospace" />
-          <button class="link-btn" data-save-supplement="${s.schoolName}">Enregistrer</button>
-          <span class="help-text-small" id="supplement-status-${s.schoolName.replace(/\s+/g, "-")}" style="margin:0"></span>
+
+        <p class="field-label" style="margin-top:14px">Suppléments dessert facturés — total : ${s.dessertSupplement || 0}</p>
+        ${schoolEntries.length
+          ? schoolEntries.map((e) => {
+              const d = new Date(e.timestamp);
+              const dateStr = d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) + " à " + d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+              return `<p class="note-tag" style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+                <span>+${e.quantity} — ${dateStr}${e.note ? ` — ${e.note}` : ""}</span>
+                <button class="link-btn" style="color:#a3402e;flex-shrink:0" data-cancel-supplement="${e.id}">↩ Annuler</button>
+              </p>`;
+            }).join("")
+          : `<p class="help-text-small">Aucun supplément enregistré ce mois.</p>`
+        }
+
+        <div style="display:flex;align-items:center;gap:8px;margin:10px 0;flex-wrap:wrap">
+          <input type="number" step="1" placeholder="ex. 3 ou -2" data-add-supplement-qty="${safeId}"
+            style="width:80px;padding:6px 8px;border-radius:7px;border:1px solid #ddd6c4;font-family:'IBM Plex Mono',monospace" />
+          <input type="text" placeholder="Note (optionnel)" data-add-supplement-note="${safeId}"
+            style="flex:1;min-width:120px;padding:6px 8px;border-radius:7px;border:1px solid #ddd6c4" />
+          <button class="link-btn" data-add-supplement="${s.schoolName}" data-safe-id="${safeId}">+ Ajouter</button>
         </div>
-        <button class="link-btn" style="color:#a3402e" data-delete-school-month="${s.schoolName}">
+        <span class="help-text-small" id="supplement-status-${safeId}"></span>
+
+        <button class="link-btn" style="color:#a3402e;margin-top:10px;display:block" data-delete-school-month="${s.schoolName}">
           🗑 Supprimer les commandes de ce mois pour cette école
         </button>
       </div>
@@ -303,8 +323,11 @@ function renderMonth(data) {
   });
   const btnAll = document.getElementById("btn-delete-all-corrections");
   if (btnAll) btnAll.addEventListener("click", deleteAllCorrections);
-  document.querySelectorAll("[data-save-supplement]").forEach((btn) => {
-    btn.addEventListener("click", () => saveDessertSupplement(btn.dataset.saveSupplement));
+  document.querySelectorAll("[data-add-supplement]").forEach((btn) => {
+    btn.addEventListener("click", () => addDessertSupplement(btn.dataset.addSupplement, btn.dataset.safeId));
+  });
+  document.querySelectorAll("[data-cancel-supplement]").forEach((btn) => {
+    btn.addEventListener("click", () => cancelDessertSupplement(btn.dataset.cancelSupplement, btn));
   });
 }
 
@@ -373,26 +396,51 @@ async function deleteAllCorrections() {
   }
 }
 
-async function saveDessertSupplement(schoolName) {
-  const input = document.querySelector(`[data-supplement-school="${schoolName}"]`);
-  const statusEl = document.getElementById(`supplement-status-${schoolName.replace(/\s+/g, "-")}`);
-  const quantity = Math.max(0, parseInt(input.value, 10) || 0);
+async function addDessertSupplement(schoolName, safeId) {
+  const qtyInput = document.querySelector(`[data-add-supplement-qty="${safeId}"]`);
+  const noteInput = document.querySelector(`[data-add-supplement-note="${safeId}"]`);
+  const statusEl = document.getElementById(`supplement-status-${safeId}`);
+  const quantity = parseInt(qtyInput.value, 10) || 0;
+  if (!quantity) {
+    statusEl.textContent = "Entrez une quantité différente de zéro.";
+    return;
+  }
   statusEl.textContent = "Enregistrement…";
   try {
     const res = await fetch("/api/billing/dessert-supplement", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: kitchenCode, schoolName, month: selectedMonth, quantity }),
+      body: JSON.stringify({ code: kitchenCode, schoolName, month: selectedMonth, quantity, note: noteInput.value.trim() }),
     });
     const data = await res.json();
     if (!data.ok) {
       statusEl.textContent = data.error || "Erreur.";
       return;
     }
-    statusEl.textContent = "✓ Enregistré";
-    setTimeout(() => (statusEl.textContent = ""), 2500);
+    loadMonth();
   } catch (e) {
     statusEl.textContent = e.message;
+  }
+}
+
+async function cancelDessertSupplement(id, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/billing/dessert-supplement/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, id }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de l'annulation.");
+      btn.disabled = false;
+      return;
+    }
+    loadMonth();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
   }
 }
 </script>
