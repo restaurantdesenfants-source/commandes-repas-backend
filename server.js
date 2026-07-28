@@ -145,6 +145,20 @@ function emptyWeek() {
   };
 }
 
+// Calcule le dessert par défaut (1 par repas maternel/primaire/primaire+) pour
+// chaque jour d'une semaine — utilisé uniquement à la création/rectification par
+// l'école. Un ajustement manuel fait ensuite en cuisine (admin-edit) n'est jamais
+// écrasé par cette fonction.
+function autoFillDessert(week) {
+  const result = {};
+  JOURS.forEach((j) => {
+    const d = week[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+    const repas = Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
+    result[j.id] = { ...d, dessert: repas };
+  });
+  return result;
+}
+
 // ---------- Accès base de données (Supabase) ----------
 async function getSchool(nameLower) {
   const { data, error } = await supabase.from("schools").select("*").eq("id", nameLower).maybeSingle();
@@ -253,6 +267,21 @@ async function getAllCorrections() {
   const { data, error } = await supabase.from("corrections").select("*");
   if (error) throw error;
   return data;
+}
+
+// Suppléments dessert : facturés manuellement par école et par mois, indépendants
+// des commandes normales, jamais visibles ni gérés côté école.
+async function getDessertSupplementsForMonth(month) {
+  const { data, error } = await supabase.from("dessert_supplements").select("school_name, quantity").eq("month", month);
+  if (error) throw error;
+  return data;
+}
+
+async function upsertDessertSupplement(schoolName, month, quantity) {
+  const { error } = await supabase
+    .from("dessert_supplements")
+    .upsert({ school_name: schoolName, month, quantity, updated_at: new Date().toISOString() }, { onConflict: "school_name,month" });
+  if (error) throw error;
 }
 
 // ---------- Envoi d'email via Brevo ----------
@@ -440,12 +469,14 @@ app.post("/api/orders", async (req, res) => {
       await upsertSchool(nameLower, schoolName.trim(), hash);
     }
 
+    const weekWithDessert = autoFillDessert(week);
+
     await upsertOrder({
       week_key: weekKey,
       school_name_lower: nameLower,
       school_name: schoolName.trim(),
       school_email: schoolEmail.trim(),
-      week,
+      week: weekWithDessert,
       comment: comment || "",
       submitted_at: new Date().toISOString(),
     });
@@ -766,6 +797,26 @@ app.post("/api/billing/delete-corrections-month", async (req, res) => {
   }
 });
 
+// Enregistre le nombre de desserts "supplément" facturés manuellement pour une
+// école, un mois donné. Totalement indépendant des commandes normales.
+app.post("/api/billing/dessert-supplement", async (req, res) => {
+  try {
+    const { code, schoolName, month, quantity } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!schoolName || !month || quantity === undefined) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    const q = Math.max(0, Math.round(Number(quantity) || 0));
+    await upsertDessertSupplement(schoolName.trim(), month, q);
+    res.json({ ok: true, quantity: q });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
 app.get("/api/orders", async (req, res) => {
   try {
     const { weekKey, code } = req.query;
@@ -827,13 +878,21 @@ app.get("/api/billing", async (req, res) => {
         const val = (r.week || {})[j.id] || {};
         const key = r.school_name;
         if (!bySchool[key]) {
-          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
+          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessertSupplement: 0 };
         }
         bySchool[key].soupe += Number(val.soupe || 0);
         bySchool[key].maternelle += Number(val.maternelle || 0);
         bySchool[key].primaire += Number(val.primaire || 0);
         bySchool[key].primairePlus += Number(val.primairePlus || 0);
       });
+    });
+
+    const supplements = await getDessertSupplementsForMonth(month);
+    supplements.forEach((s) => {
+      if (!bySchool[s.school_name]) {
+        bySchool[s.school_name] = { schoolName: s.school_name, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessertSupplement: 0 };
+      }
+      bySchool[s.school_name].dessertSupplement = s.quantity;
     });
 
     const allCorrections = await getAllCorrections();
@@ -856,8 +915,9 @@ app.get("/api/billing", async (req, res) => {
         maternelle: acc.maternelle + s.maternelle,
         primaire: acc.primaire + s.primaire,
         primairePlus: acc.primairePlus + s.primairePlus,
+        dessertSupplement: acc.dessertSupplement + (s.dessertSupplement || 0),
       }),
-      { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 }
+      { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessertSupplement: 0 }
     );
 
     res.json({ ok: true, schools, totals, corrections: correctionsThisMonth });
