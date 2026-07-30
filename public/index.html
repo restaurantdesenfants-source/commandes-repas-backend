@@ -54,7 +54,10 @@
     <div id="days-container"></div>
 
     <p class="total-row"><span>Total repas / semaine</span><span class="total-value" id="total-repas">0</span></p>
-    <p class="total-row" style="margin-top:-14px"><span>Total soupe / semaine</span><span class="total-value" id="total-soupe">0 L</span></p>
+    <p class="total-row" style="margin-top:-14px;font-size:12.5px"><span>— dont maternelle</span><span class="total-value" id="total-maternelle" style="font-size:14px">0</span></p>
+    <p class="total-row" style="margin-top:-10px;font-size:12.5px"><span>— dont primaire</span><span class="total-value" id="total-primaire" style="font-size:14px">0</span></p>
+    <p class="total-row" style="margin-top:-10px;font-size:12.5px"><span>— dont primaire +</span><span class="total-value" id="total-primaire-plus" style="font-size:14px">0</span></p>
+    <p class="total-row" style="margin-top:-4px"><span>Total soupe / semaine</span><span class="total-value" id="total-soupe">0 L</span></p>
 
     <label class="field-label">Commentaire (optionnel)</label>
     <textarea id="input-comment" rows="3" placeholder="Toute précision utile pour la cuisine…"></textarea>
@@ -337,11 +340,20 @@ document.getElementById("input-comment").addEventListener("input", hideConfirm);
 function updateTotals() {
   let totalRepas = 0;
   let totalSoupe = 0;
+  let totalMaternelle = 0;
+  let totalPrimaire = 0;
+  let totalPrimairePlus = 0;
   JOURS.forEach((j) => {
-    totalRepas += week[j.id].maternelle + week[j.id].primaire + week[j.id].primairePlus;
+    totalMaternelle += Number(week[j.id].maternelle || 0);
+    totalPrimaire += Number(week[j.id].primaire || 0);
+    totalPrimairePlus += Number(week[j.id].primairePlus || 0);
     totalSoupe += Number(week[j.id].soupe || 0);
   });
+  totalRepas = totalMaternelle + totalPrimaire + totalPrimairePlus;
   document.getElementById("total-repas").textContent = totalRepas;
+  document.getElementById("total-maternelle").textContent = totalMaternelle;
+  document.getElementById("total-primaire").textContent = totalPrimaire;
+  document.getElementById("total-primaire-plus").textContent = totalPrimairePlus;
   document.getElementById("total-soupe").textContent = `${totalSoupe} L`;
   document.getElementById("btn-submit").disabled = totalRepas === 0;
   document.getElementById("hint-empty").style.display = totalRepas === 0 ? "block" : "none";
