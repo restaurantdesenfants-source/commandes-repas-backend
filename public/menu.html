@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Menu du mois</title>
+<link rel="stylesheet" href="/style.css" />
+<style>
+  .menu-image-wrap {
+    display: flex;
+    justify-content: center;
+    padding: 16px 0 32px;
+  }
+  .menu-image-wrap img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/cuisine.html">Cuisine</a>
+      <a href="/facturation.html">Facturation</a>
+      <a href="/menu.html" class="active">Menu</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <h1>Menu du mois</h1>
+    <p class="help-text">Retrouvez ci-dessous le menu en vigueur. La composition des plats est susceptible de varier.</p>
+  </div>
+
+  <div class="menu-image-wrap">
+    <!--
+      Pour changer le menu chaque mois :
+      1. Déposer la nouvelle image dans public/menus/ (ex: 2026-10.jpg)
+      2. Mettre à jour le "src" ci-dessous avec le nouveau nom de fichier
+    -->
+    <img src="/menus/2026-09.jpg" alt="Menu du mois" />
+  </div>
+</main>
+</body>
+</html>
