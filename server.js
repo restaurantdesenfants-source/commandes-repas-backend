@@ -269,6 +269,12 @@ async function getAllCorrections() {
   return data;
 }
 
+async function getCorrectionsForWeek(weekKey) {
+  const { data, error } = await supabase.from("corrections").select("*").eq("week_key", weekKey);
+  if (error) throw error;
+  return data;
+}
+
 // Suppléments dessert : historique d'entrées facturées manuellement par école et
 // par mois, indépendant des commandes normales, jamais visible ni géré côté école.
 // Chaque entrée peut être annulée individuellement (suppression de la ligne).
@@ -858,7 +864,19 @@ app.get("/api/orders", async (req, res) => {
     }
     const rows = weekKey ? await getOrdersForWeek(weekKey) : [];
     const orders = rows.map((r) => ({ schoolName: r.school_name, week: r.week, comment: r.comment }));
-    res.json({ ok: true, orders });
+    const correctionRows = weekKey ? await getCorrectionsForWeek(weekKey) : [];
+    // On ne renvoie que le nécessaire pour signaler les jours rectifiés (école + jour),
+    // dédoublonné pour éviter de répéter la même alerte plusieurs fois.
+    const seen = new Set();
+    const corrections = [];
+    correctionRows.forEach((c) => {
+      const key = `${c.school_name}||${c.day_id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        corrections.push({ schoolName: c.school_name, dayId: c.day_id });
+      }
+    });
+    res.json({ ok: true, orders, corrections });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -907,10 +925,13 @@ app.get("/api/billing", async (req, res) => {
         const val = (r.week || {})[j.id] || {};
         const key = r.school_name;
         if (!bySchool[key]) {
-          bySchool[key] = { schoolName: key, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 };
+          bySchool[key] = { schoolName: key, soupe: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 };
         }
         const repas = Number(val.maternelle || 0) + Number(val.primaire || 0) + Number(val.primairePlus || 0);
+        // Soupe incluse : 0,2 L par repas maternel/primaire/primaire+ commandé, comme en cuisine.
+        const soupeIncluseJour = Math.round(repas * 0.2 * 100) / 100;
         bySchool[key].soupe += Number(val.soupe || 0);
+        bySchool[key].soupeIncluse += soupeIncluseJour;
         bySchool[key].maternelle += Number(val.maternelle || 0);
         bySchool[key].primaire += Number(val.primaire || 0);
         bySchool[key].primairePlus += Number(val.primairePlus || 0);
@@ -928,7 +949,7 @@ app.get("/api/billing", async (req, res) => {
     }));
     dessertSupplementEntries.forEach((s) => {
       if (!bySchool[s.schoolName]) {
-        bySchool[s.schoolName] = { schoolName: s.schoolName, soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 };
+        bySchool[s.schoolName] = { schoolName: s.schoolName, soupe: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 };
       }
       bySchool[s.schoolName].dessertSupplement += s.quantity;
     });
@@ -950,13 +971,15 @@ app.get("/api/billing", async (req, res) => {
     const totals = schools.reduce(
       (acc, s) => ({
         soupe: acc.soupe + s.soupe,
+        soupeIncluse: acc.soupeIncluse + (s.soupeIncluse || 0),
         maternelle: acc.maternelle + s.maternelle,
         primaire: acc.primaire + s.primaire,
         primairePlus: acc.primairePlus + s.primairePlus,
         dessert: acc.dessert + s.dessert,
         dessertSupplement: acc.dessertSupplement + (s.dessertSupplement || 0),
       }),
-      { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 }
+      { soupe: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 }
+
     );
 
     res.json({ ok: true, schools, totals, corrections: correctionsThisMonth, dessertSupplementEntries });
