@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fiche de commande — Facturation</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/menu.html">Menu</a>
+      <a href="/cuisine.html">Cuisine</a>
+      <a href="/facturation.html" class="active">Facturation</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow">Historique</p>
+        <h1>🧾 Facturation par école</h1>
+      </div>
+    </div>
+
+    <div id="login-block">
+      <p class="help-text">Cette page est réservée à la cuisine. Entrez le code d'accès.</p>
+      <input type="password" id="kitchen-code" placeholder="Code cuisine" />
+      <p class="error-text" id="kitchen-error" style="display:none"></p>
+      <button class="primary-btn" id="btn-kitchen-login">Accéder</button>
+    </div>
+
+    <div id="billing-content" style="display:none"></div>
+  </div>
+
+  <div class="card" id="directory-card" style="display:none;margin-top:20px">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow">Annuaire</p>
+        <h1>📇 Écoles</h1>
+      </div>
+      <button class="link-btn" id="btn-refresh-directory">↻ Actualiser</button>
+    </div>
+    <p class="help-text-small" style="margin-top:-10px;margin-bottom:16px">
+      Les codes d'accès sont chiffrés et ne peuvent jamais être affichés en clair — seule une réinitialisation est possible.
+    </p>
+    <div id="directory-content"><p class="help-text">Chargement…</p></div>
+  </div>
+</main>
+
+<script src="/shared.js"></script>
+<script>
+let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
+let months = [];
+let selectedMonth = null;
+
+if (kitchenCode) tryLoad();
+
+document.getElementById("btn-kitchen-login").addEventListener("click", () => {
+  kitchenCode = document.getElementById("kitchen-code").value.trim();
+  if (!kitchenCode) return;
+  tryLoad();
+});
+
+async function tryLoad() {
+  const errEl = document.getElementById("kitchen-error");
+  errEl.style.display = "none";
+  try {
+    const res = await fetch(`/api/billing/months?code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = "Code cuisine incorrect.";
+      errEl.style.display = "block";
+      sessionStorage.removeItem("kitchenCode");
+      return;
+    }
+    sessionStorage.setItem("kitchenCode", kitchenCode);
+    months = data.months || [];
+    document.getElementById("login-block").style.display = "none";
+    document.getElementById("billing-content").style.display = "block";
+    document.getElementById("directory-card").style.display = "block";
+    renderMonthPicker();
+    loadDirectory();
+  } catch (e) {
+    errEl.textContent = "Erreur de connexion, réessayez.";
+    errEl.style.display = "block";
+  }
+}
+
+async function loadDirectory() {
+  const el = document.getElementById("directory-content");
+  el.innerHTML = `<p class="help-text">Chargement…</p>`;
+  try {
+    const res = await fetch(`/api/schools?code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok || !data.schools.length) {
+      el.innerHTML = `<p class="help-text">Aucune école enregistrée pour l'instant.</p>`;
+      return;
+    }
+    el.innerHTML = data.schools.map((s) => `
+      <div class="school-block">
+        <div class="school-block-head" style="margin-bottom:6px">
+          <span class="school-name">${s.schoolName}</span>
+        </div>
+        <p class="help-text-small" style="margin-top:0">${s.schoolEmail || "<span style='opacity:.5'>email non renseigné</span>"}</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="primary-btn" style="width:auto;padding:9px 16px" data-reset="${s.schoolName}">Envoyer un nouveau code</button>
+          <button class="link-btn" style="color:#a3402e" data-delete="${s.schoolName}">🗑 Supprimer l'école</button>
+        </div>
+      </div>
+    `).join("");
+    document.querySelectorAll("[data-reset]").forEach((btn) => {
+      btn.addEventListener("click", () => resetCode(btn.dataset.reset, btn));
+    });
+    document.querySelectorAll("[data-delete]").forEach((btn) => {
+      btn.addEventListener("click", () => deleteSchool(btn.dataset.delete, btn));
+    });
+  } catch (e) {
+    el.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+async function deleteSchool(schoolName, btn) {
+  if (!confirm(`Supprimer définitivement "${schoolName}" ? Ceci efface aussi toutes ses commandes et rectifications passées. Action irréversible.`)) return;
+  if (!confirm(`Dernière confirmation : "${schoolName}" et tout son historique seront perdus pour toujours. Continuer ?`)) return;
+  btn.textContent = "Suppression…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/schools/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de la suppression.");
+      btn.textContent = "🗑 Supprimer l'école";
+      btn.disabled = false;
+      return;
+    }
+    loadDirectory();
+  } catch (e) {
+    alert(e.message);
+    btn.textContent = "🗑 Supprimer l'école";
+    btn.disabled = false;
+  }
+}
+
+async function resetCode(schoolName, btn) {
+  if (!confirm(`Envoyer un nouveau code d'accès à "${schoolName}" par email ? L'ancien code cessera de fonctionner immédiatement.`)) return;
+  btn.textContent = "…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/schools/reset-code", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de l'envoi du nouveau code.");
+      btn.textContent = "Envoyer un nouveau code";
+      btn.disabled = false;
+      return;
+    }
+    btn.textContent = "Nouveau code envoyé ✓";
+  } catch (e) {
+    alert(e.message);
+    btn.textContent = "Envoyer un nouveau code";
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-refresh-directory").addEventListener("click", loadDirectory);
+
+function monthLabel(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1, 1));
+  return d.toLocaleDateString("fr-FR", { month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+function renderMonthPicker() {
+  const content = document.getElementById("billing-content");
+  if (!months.length) {
+    content.innerHTML = `<div class="empty-state">🧾<p class="help-text">Aucune commande enregistrée pour l'instant.</p></div>`;
+    return;
+  }
+  selectedMonth = selectedMonth || months[0];
+  content.innerHTML = `
+    <label class="field-label">Mois</label>
+    <select id="month-select" style="width:100%;padding:12px 14px;border-radius:9px;border:1px solid #ddd6c4;font-size:16px;margin-bottom:20px;font-family:'Work Sans',sans-serif">
+      ${months.map((m) => `<option value="${m}" ${m === selectedMonth ? "selected" : ""}>${monthLabel(m)}</option>`).join("")}
+    </select>
+    <div id="month-content"><p class="help-text">Chargement…</p></div>
+  `;
+  document.getElementById("month-select").addEventListener("change", (e) => {
+    selectedMonth = e.target.value;
+    loadMonth();
+  });
+  loadMonth();
+}
+
+async function loadMonth() {
+  const el = document.getElementById("month-content");
+  el.innerHTML = `<p class="help-text">Chargement…</p>`;
+  try {
+    const res = await fetch(`/api/billing?code=${encodeURIComponent(kitchenCode)}&month=${encodeURIComponent(selectedMonth)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      el.innerHTML = `<p class="error-text">${data.error || "Erreur de chargement."}</p>`;
+      return;
+    }
+    renderMonth(data);
+  } catch (e) {
+    el.innerHTML = `<p class="error-text">${e.message}</p>`;
+  }
+}
+
+function renderMonth(data) {
+  const el = document.getElementById("month-content");
+  if (!data.schools.length) {
+    el.innerHTML = `<div class="empty-state">🧾<p class="help-text">Aucune commande pour ce mois.</p></div>`;
+    return;
+  }
+
+  const grandTotal = data.totals.maternelle + data.totals.primaire + data.totals.primairePlus;
+  const entries = data.dessertSupplementEntries || [];
+
+  let html = `
+    <div class="stat-grid">
+      <div class="stat-card"><span class="stat-value">${data.totals.soupe} L</span><span class="stat-label">Soupe commandée</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.soupeIncluse || 0} L</span><span class="stat-label">Soupe incluse (0,2L/repas)</span></div>
+      <div class="stat-card"><span class="stat-value">${Math.round(((data.totals.soupe || 0) + (data.totals.soupeIncluse || 0)) * 100) / 100} L</span><span class="stat-label">Soupe totale</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.maternelle}</span><span class="stat-label">Maternelle</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.primaire}</span><span class="stat-label">Primaire</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.dessert || 0}</span><span class="stat-label">Dessert</span></div>
+      <div class="stat-card"><span class="stat-value">${data.totals.dessertSupplement || 0}</span><span class="stat-label">Suppléments dessert</span></div>
+    </div>
+    <p class="total-row" style="margin-top:4px"><span>Total repas du mois (toutes écoles)</span><span class="total-value">${grandTotal}</span></p>
+
+    <p class="section-title">Détail par école</p>
+  `;
+
+  data.schools.forEach((s) => {
+    const total = s.maternelle + s.primaire + s.primairePlus;
+    const schoolEntries = entries.filter((e) => e.schoolName === s.schoolName);
+    const safeId = s.schoolName.replace(/\s+/g, "-");
+    html += `
+      <div class="school-block">
+        <div class="school-block-head">
+          <span class="school-name">${s.schoolName}</span>
+          <span class="school-totals">${total} repas · ${s.soupe} L cmd + ${s.soupeIncluse || 0} L incluse = ${Math.round(((s.soupe || 0) + (s.soupeIncluse || 0)) * 100) / 100} L soupe totale</span>
+        </div>
+        <p class="help-text-small" style="margin-top:0">
+          Maternelle : ${s.maternelle} · Primaire : ${s.primaire} · Primaire + : ${s.primairePlus} · Dessert : ${s.dessert || 0}
+        </p>
+
+        <p class="field-label" style="margin-top:14px">Suppléments dessert facturés — total : ${s.dessertSupplement || 0}</p>
+        ${schoolEntries.length
+          ? schoolEntries.map((e) => {
+              const d = new Date(e.timestamp);
+              const dateStr = d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) + " à " + d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+              return `<p class="note-tag" style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+                <span>+${e.quantity} — ${dateStr}${e.note ? ` — ${e.note}` : ""}</span>
+                <button class="link-btn" style="color:#a3402e;flex-shrink:0" data-cancel-supplement="${e.id}">↩ Annuler</button>
+              </p>`;
+            }).join("")
+          : `<p class="help-text-small">Aucun supplément enregistré ce mois.</p>`
+        }
+
+        <div style="display:flex;align-items:center;gap:8px;margin:10px 0;flex-wrap:wrap">
+          <input type="number" step="1" placeholder="ex. 3 ou -2" data-add-supplement-qty="${safeId}"
+            style="width:80px;padding:6px 8px;border-radius:7px;border:1px solid #ddd6c4;font-family:'IBM Plex Mono',monospace" />
+          <input type="text" placeholder="Note (optionnel)" data-add-supplement-note="${safeId}"
+            style="flex:1;min-width:120px;padding:6px 8px;border-radius:7px;border:1px solid #ddd6c4" />
+          <button class="link-btn" data-add-supplement="${s.schoolName}" data-safe-id="${safeId}">+ Ajouter</button>
+        </div>
+        <span class="help-text-small" id="supplement-status-${safeId}"></span>
+
+        <button class="link-btn" style="color:#a3402e;margin-top:10px;display:block" data-delete-school-month="${s.schoolName}">
+          🗑 Supprimer les commandes de ce mois pour cette école
+        </button>
+      </div>
+    `;
+  });
+
+  if (data.corrections && data.corrections.length) {
+    html += `
+      <p class="section-title">Rectifications appliquées ce mois (${data.corrections.length})</p>
+      <button class="link-btn" style="color:#a3402e;margin-bottom:10px" id="btn-delete-all-corrections">
+        🗑 Supprimer toutes les rectifications de ce mois
+      </button>
+    `;
+    data.corrections
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .forEach((c) => {
+        const d = new Date(c.timestamp);
+        const dateStr = d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) + " à " + d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+        const parts = [];
+        CHAMPS.forEach((champ) => {
+          const v = c.delta[champ.id];
+          if (v) parts.push(`${champ.label} ${v > 0 ? "+" + v : v}`);
+        });
+        html += `
+          <p class="note-tag" style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+            <span>📝 <strong>${c.schoolName}</strong> — ${dateStr} — ${parts.join(", ")}</span>
+            <button class="link-btn" style="color:#a3402e;flex-shrink:0" data-delete-correction="${c.id}">✕</button>
+          </p>
+        `;
+      });
+  }
+
+  document.getElementById("month-content").innerHTML = html;
+
+  document.querySelectorAll("[data-delete-school-month]").forEach((btn) => {
+    btn.addEventListener("click", () => deleteSchoolMonth(btn.dataset.deleteSchoolMonth, btn));
+  });
+  document.querySelectorAll("[data-delete-correction]").forEach((btn) => {
+    btn.addEventListener("click", () => deleteCorrection(btn.dataset.deleteCorrection, btn));
+  });
+  const btnAll = document.getElementById("btn-delete-all-corrections");
+  if (btnAll) btnAll.addEventListener("click", deleteAllCorrections);
+  document.querySelectorAll("[data-add-supplement]").forEach((btn) => {
+    btn.addEventListener("click", () => addDessertSupplement(btn.dataset.addSupplement, btn.dataset.safeId));
+  });
+  document.querySelectorAll("[data-cancel-supplement]").forEach((btn) => {
+    btn.addEventListener("click", () => cancelDessertSupplement(btn.dataset.cancelSupplement, btn));
+  });
+}
+
+async function deleteSchoolMonth(schoolName, btn) {
+  if (!confirm(`Supprimer toutes les commandes de "${schoolName}" pour ${monthLabel(selectedMonth)} ? L'école garde son accès, seul son historique de ce mois disparaît. Irréversible.`)) return;
+  btn.textContent = "Suppression…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/billing/delete-school-month", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName, month: selectedMonth }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de la suppression.");
+      btn.textContent = "🗑 Supprimer les commandes de ce mois pour cette école";
+      btn.disabled = false;
+      return;
+    }
+    loadMonth();
+  } catch (e) {
+    alert(e.message);
+    btn.textContent = "🗑 Supprimer les commandes de ce mois pour cette école";
+    btn.disabled = false;
+  }
+}
+
+async function deleteCorrection(id, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/billing/delete-correction", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, id }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de la suppression.");
+      btn.disabled = false;
+      return;
+    }
+    loadMonth();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+  }
+}
+
+async function deleteAllCorrections() {
+  if (!confirm(`Supprimer toutes les rectifications de ${monthLabel(selectedMonth)} ? Ceci n'annule pas les quantités déjà rectifiées, seulement leur trace dans l'historique. Irréversible.`)) return;
+  try {
+    const res = await fetch("/api/billing/delete-corrections-month", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, month: selectedMonth }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de la suppression.");
+      return;
+    }
+    loadMonth();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function addDessertSupplement(schoolName, safeId) {
+  const qtyInput = document.querySelector(`[data-add-supplement-qty="${safeId}"]`);
+  const noteInput = document.querySelector(`[data-add-supplement-note="${safeId}"]`);
+  const statusEl = document.getElementById(`supplement-status-${safeId}`);
+  const quantity = parseInt(qtyInput.value, 10) || 0;
+  if (!quantity) {
+    statusEl.textContent = "Entrez une quantité différente de zéro.";
+    return;
+  }
+  statusEl.textContent = "Enregistrement…";
+  try {
+    const res = await fetch("/api/billing/dessert-supplement", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName, month: selectedMonth, quantity, note: noteInput.value.trim() }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error || "Erreur.";
+      return;
+    }
+    loadMonth();
+  } catch (e) {
+    statusEl.textContent = e.message;
+  }
+}
+
+async function cancelDessertSupplement(id, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/billing/dessert-supplement/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, id }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert(data.error || "Erreur lors de l'annulation.");
+      btn.disabled = false;
+      return;
+    }
+    loadMonth();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>
