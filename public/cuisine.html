@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fiche de commande — Cuisine</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/menu.html">Menu</a>
+      <a href="/cuisine.html" class="active">Cuisine</a>
+      <a href="/facturation.html">Facturation</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="deadline-bar" id="deadline-bar"></div>
+
+  <div class="card">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow" id="cuisine-week"></p>
+        <h1>👨‍🍳 Vue cuisine</h1>
+      </div>
+      <button class="link-btn" id="btn-refresh" style="display:none">↻ Actualiser</button>
+    </div>
+    <div id="week-nav" style="display:none;margin-bottom:16px">
+      <button class="link-btn" id="btn-prev-week">◀ Semaine précédente</button>
+      <button class="link-btn" id="btn-next-week" style="margin-left:16px">Semaine suivante ▶</button>
+      <button class="link-btn" id="btn-this-week" style="display:none;margin-left:16px">↺ Revenir à cette semaine</button>
+    </div>
+
+    <div id="login-block">
+      <p class="help-text">Cette page est réservée à la cuisine. Entrez le code d'accès.</p>
+      <input type="password" id="kitchen-code" placeholder="Code cuisine" />
+      <p class="error-text" id="kitchen-error" style="display:none"></p>
+      <button class="primary-btn" id="btn-kitchen-login">Accéder</button>
+    </div>
+
+    <div id="cuisine-content" style="display:none"></div>
+  </div>
+</main>
+
+<script src="/shared.js"></script>
+<script>
+const target = renderDeadlineBar();
+let weekOffset = 0; // 0 = semaine EN COURS (celle servie maintenant), pas la semaine de commande future
+const SOUPE_INCLUSE_PAR_REPAS = 0.2; // litres inclus par repas maternel/primaire/primaire+ commandé
+
+function displayedMonday() {
+  const d = getCurrentWeekMonday();
+  d.setDate(d.getDate() + weekOffset * 7);
+  return d;
+}
+
+function updateWeekHeader() {
+  const monday = displayedMonday();
+  const label = weekOffset === 0 ? " (semaine en cours)" : weekOffset < 0 ? " (semaine passée)" : " (à venir)";
+  document.getElementById("cuisine-week").textContent = `Semaine du ${weekLabelFor(monday)}${label}`;
+  document.getElementById("btn-this-week").style.display = weekOffset === 0 ? "none" : "inline";
+}
+updateWeekHeader();
+
+let kitchenCode = sessionStorage.getItem("kitchenCode") || "";
+let currentOrders = [];
+let currentCorrections = []; // [{schoolName, dayId}] pour la semaine affichée
+function isDayCorrected(schoolName, dayId) {
+  return currentCorrections.some((c) => c.schoolName === schoolName && c.dayId === dayId);
+}
+let editingSchool = null;
+let selectedSheetDay = null;
+let menus = {
+  lundi: { soupe: "", plat: "", dessert: "" },
+  mardi: { soupe: "", plat: "", dessert: "" },
+  jeudi: { soupe: "", plat: "", dessert: "" },
+  vendredi: { soupe: "", plat: "", dessert: "" },
+};
+
+// Soupe incluse est TOUJOURS calculée : 0,2 L par repas maternel/primaire/primaire+
+// (en plus de la soupe commandée séparément).
+// Dessert vaut au minimum 1 par repas (recalculé à l'affichage, y compris pour les
+// commandes passées avant l'ajout de ce calcul) ; un chiffre plus élevé enregistré
+// manuellement en cuisine (supplément) est toujours respecté puisqu'il ne peut
+// jamais être inférieur à ce minimum.
+function withDerived(d) {
+  const repas = Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0);
+  const soupeCommandee = Number(d.soupe || 0);
+  const soupeIncluse = Math.round(repas * SOUPE_INCLUSE_PAR_REPAS * 100) / 100;
+  const storedDessert = d.dessert !== undefined && d.dessert !== null ? Number(d.dessert) : 0;
+  return {
+    ...d,
+    repas,
+    dessert: Math.max(storedDessert, repas),
+    soupeCommandee,
+    soupeIncluse,
+    soupeTotale: Math.round((soupeCommandee + soupeIncluse) * 100) / 100,
+  };
+}
+
+function dayHeader(j) {
+  return `${j.label} <span style="opacity:.6;font-weight:400">${shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id))}</span>`;
+}
+
+function dayHeaderForSchool(j, schoolName) {
+  const base = dayHeader(j);
+  if (isDayCorrected(schoolName, j.id)) {
+    return `<span style="color:#a3402e;font-weight:700">⚠️ Attention</span> ${base}`;
+  }
+  return base;
+}
+
+if (kitchenCode) tryLoad();
+
+document.getElementById("btn-kitchen-login").addEventListener("click", () => {
+  kitchenCode = document.getElementById("kitchen-code").value.trim();
+  if (!kitchenCode) return;
+  tryLoad();
+});
+
+document.getElementById("btn-prev-week").addEventListener("click", () => {
+  weekOffset -= 1;
+  updateWeekHeader();
+  load();
+});
+document.getElementById("btn-next-week").addEventListener("click", () => {
+  weekOffset += 1;
+  updateWeekHeader();
+  load();
+});
+document.getElementById("btn-this-week").addEventListener("click", () => {
+  weekOffset = 0;
+  updateWeekHeader();
+  load();
+});
+
+async function tryLoad() {
+  const errEl = document.getElementById("kitchen-error");
+  errEl.style.display = "none";
+  const ok = await load();
+  if (ok) {
+    sessionStorage.setItem("kitchenCode", kitchenCode);
+    document.getElementById("login-block").style.display = "none";
+    document.getElementById("cuisine-content").style.display = "block";
+    document.getElementById("btn-refresh").style.display = "inline-flex";
+    document.getElementById("week-nav").style.display = "block";
+  } else {
+    errEl.textContent = "Code cuisine incorrect.";
+    errEl.style.display = "block";
+    sessionStorage.removeItem("kitchenCode");
+  }
+}
+
+async function load() {
+  const content = document.getElementById("cuisine-content");
+  content.innerHTML = `<p class="help-text">Chargement des commandes…</p>`;
+  try {
+    const res = await fetch(`/api/orders?weekKey=${encodeURIComponent(weekKeyFor(displayedMonday()))}&code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok) return false;
+    currentOrders = (data.orders || []).map((o) => ({
+      ...o,
+      week: Object.fromEntries(JOURS.map((j) => [j.id, { ...emptyDay(), ...(o.week[j.id] || {}) }])),
+    }));
+    currentCorrections = data.corrections || [];
+    editingSchool = null;
+    render();
+    return true;
+  } catch (e) {
+    content.innerHTML = `<p class="error-text">Impossible de charger les commandes : ${e.message}</p>`;
+    return false;
+  }
+}
+
+function render() {
+  const orders = currentOrders;
+  const content = document.getElementById("cuisine-content");
+
+  if (!orders.length) {
+    content.innerHTML = `
+      <div class="empty-state">📋<p class="help-text">Aucune commande reçue pour cette semaine pour l'instant.</p></div>
+      ${renderAddMissingSection()}
+      ${renderMonthEncodeSection()}
+    `;
+    attachAdminToolsHandlers();
+    return;
+  }
+
+  orders.sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
+
+  const dayTotals = {};
+  JOURS.forEach((j) => {
+    dayTotals[j.id] = { soupeCommandee: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+    orders.forEach((o) => {
+      const d = withDerived(o.week[j.id] || {});
+      dayTotals[j.id].soupeCommandee += d.soupeCommandee;
+      dayTotals[j.id].soupeIncluse += d.soupeIncluse;
+      dayTotals[j.id].maternelle += Number(d.maternelle || 0);
+      dayTotals[j.id].primaire += Number(d.primaire || 0);
+      dayTotals[j.id].primairePlus += Number(d.primairePlus || 0);
+      dayTotals[j.id].dessert += d.dessert;
+    });
+  });
+
+  const weekTotals = { soupeCommandee: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+  JOURS.forEach((j) => {
+    weekTotals.soupeCommandee += dayTotals[j.id].soupeCommandee;
+    weekTotals.soupeIncluse += dayTotals[j.id].soupeIncluse;
+    weekTotals.maternelle += dayTotals[j.id].maternelle;
+    weekTotals.primaire += dayTotals[j.id].primaire;
+    weekTotals.primairePlus += dayTotals[j.id].primairePlus;
+    weekTotals.dessert += dayTotals[j.id].dessert;
+  });
+  const grandTotal = weekTotals.maternelle + weekTotals.primaire + weekTotals.primairePlus;
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  let html = `
+    ${renderAddMissingSection()}
+    ${renderMonthEncodeSection()}
+
+    <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat-card"><span class="stat-value">${round2(weekTotals.soupeCommandee)} L</span><span class="stat-label">Soupe commandée</span></div>
+      <div class="stat-card"><span class="stat-value">${round2(weekTotals.soupeIncluse)} L</span><span class="stat-label">Soupe incluse (0,2L/repas)</span></div>
+      <div class="stat-card"><span class="stat-value">${round2(weekTotals.soupeCommandee + weekTotals.soupeIncluse)} L</span><span class="stat-label">Soupe totale</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.maternelle}</span><span class="stat-label">Maternelle</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.primaire}</span><span class="stat-label">Primaire</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.primairePlus}</span><span class="stat-label">Primaire +</span></div>
+      <div class="stat-card"><span class="stat-value">${weekTotals.dessert}</span><span class="stat-label">Dessert (1/repas)</span></div>
+    </div>
+    <p class="total-row" style="margin-top:4px"><span>Total repas semaine</span><span class="total-value">${grandTotal}</span></p>
+    <p class="help-text-small" style="margin-top:-6px">Dessert et soupe incluse sont calculés automatiquement (1 dessert et 0,2 L de soupe par repas maternel/primaire/primaire+), pas saisis.</p>
+
+    <p class="section-title">Fiches à imprimer</p>
+    <div id="day-sheet-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      ${JOURS.map((j) => `<button class="link-btn day-sheet-tab" data-day="${j.id}" style="border:1px solid #ddd6c4;border-radius:8px;padding:7px 12px">${j.label}</button>`).join("")}
+    </div>
+    <div id="day-sheet-preview"></div>
+
+    <p class="section-title">Répartition par jour</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="school-col">Jour</th><th>Soupe cmd.</th><th>Soupe incl.</th><th>Soupe tot.</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <tbody>
+          ${JOURS.map((j) => `
+            <tr>
+              <td class="school-col">${dayHeader(j)}</td>
+              <td>${round2(dayTotals[j.id].soupeCommandee)}</td>
+              <td>${round2(dayTotals[j.id].soupeIncluse)}</td>
+              <td>${round2(dayTotals[j.id].soupeCommandee + dayTotals[j.id].soupeIncluse)}</td>
+              <td>${dayTotals[j.id].maternelle}</td>
+              <td>${dayTotals[j.id].primaire}</td>
+              <td>${dayTotals[j.id].primairePlus}</td>
+              <td>${dayTotals[j.id].dessert}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="section-title">Détail par école (${orders.length})</p>
+  `;
+
+  orders.forEach((o, idx) => {
+    const isEditing = editingSchool === o.schoolName;
+    let schoolTotal = 0;
+    let schoolSoupeCmd = 0;
+    let schoolSoupeIncl = 0;
+    JOURS.forEach((j) => {
+      const d = withDerived(o.week[j.id] || {});
+      schoolTotal += d.repas;
+      schoolSoupeCmd += d.soupeCommandee;
+      schoolSoupeIncl += d.soupeIncluse;
+    });
+
+    html += `
+      <div class="school-block">
+        <div class="school-block-head">
+          <span class="school-name">${o.schoolName}</span>
+          <span class="school-totals">${schoolTotal} repas · ${round2(schoolSoupeCmd)} L cmd + ${round2(schoolSoupeIncl)} L incluse = ${round2(schoolSoupeCmd + schoolSoupeIncl)} L soupe totale</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th class="school-col">Jour</th><th>Soupe cmd.</th><th>Soupe incl.</th><th>Soupe tot.</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+            <tbody>
+              ${JOURS.map((j) => {
+                const d = withDerived(o.week[j.id] || {});
+                if (isEditing) {
+                  const inputStyle = "width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px";
+                  return `<tr>
+                    <td class="school-col">${dayHeaderForSchool(j, o.schoolName)}</td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="soupe" value="${d.soupeCommandee}" style="${inputStyle}" /></td>
+                    <td style="opacity:.65">${round2(d.soupeIncluse)}</td>
+                    <td style="opacity:.65">${round2(d.soupeTotale)}</td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="maternelle" value="${d.maternelle || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primaire" value="${d.primaire || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primairePlus" value="${d.primairePlus || 0}" style="${inputStyle}" /></td>
+                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="dessert" value="${d.dessert}" style="${inputStyle}" /></td>
+                  </tr>`;
+                }
+                return `<tr><td class="school-col">${dayHeaderForSchool(j, o.schoolName)}</td><td>${round2(d.soupeCommandee)}</td><td>${round2(d.soupeIncluse)}</td><td>${round2(d.soupeTotale)}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td><td>${d.dessert}</td></tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+        ${isEditing ? `<p class="help-text-small">Soupe incluse se recalcule automatiquement. Dessert est pré-rempli (1/repas) mais modifiable pour les suppléments.</p>` : ""}
+        ${o.comment ? `<p class="note-tag">💬 ${o.comment}</p>` : ""}
+        <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+          ${isEditing
+            ? `<button class="primary-btn" style="width:auto;padding:9px 16px" data-action="save" data-idx="${idx}">Enregistrer les modifications</button>
+               <button class="link-btn" data-action="cancel">Annuler</button>`
+            : `<button class="link-btn" data-action="edit" data-school="${o.schoolName}">✏️ Modifier les quantités</button>`
+          }
+        </div>
+        <p class="error-text" id="edit-error-${idx}" style="display:none"></p>
+      </div>
+    `;
+  });
+
+  content.innerHTML = html;
+  attachHandlers();
+  attachAdminToolsHandlers();
+}
+
+function attachHandlers() {
+  document.querySelectorAll('[data-action="edit"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      editingSchool = btn.dataset.school;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-action="cancel"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      editingSchool = null;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-action="save"]').forEach((btn) => {
+    btn.addEventListener("click", () => saveEdit(parseInt(btn.dataset.idx, 10)));
+  });
+  document.querySelectorAll(".day-sheet-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedSheetDay = btn.dataset.day;
+      renderDaySheetPreview();
+    });
+  });
+  if (selectedSheetDay) renderDaySheetPreview();
+}
+
+function renderDaySheetPreview() {
+  document.querySelectorAll(".day-sheet-tab").forEach((btn) => {
+    btn.style.background = btn.dataset.day === selectedSheetDay ? "#c9a227" : "transparent";
+    btn.style.color = btn.dataset.day === selectedSheetDay ? "#24302a" : "";
+  });
+
+  const j = JOURS.find((x) => x.id === selectedSheetDay);
+  const preview = document.getElementById("day-sheet-preview");
+  if (!j) {
+    preview.innerHTML = "";
+    return;
+  }
+
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const rows = currentOrders
+    .map((o) => ({ name: o.schoolName, ...withDerived(o.week[j.id] || {}) }))
+    .filter((r) => r.soupeCommandee || r.maternelle || r.primaire || r.primairePlus);
+
+  const totals = rows.reduce(
+    (acc, r) => ({
+      soupeCommandee: acc.soupeCommandee + r.soupeCommandee,
+      soupeIncluse: acc.soupeIncluse + r.soupeIncluse,
+      maternelle: acc.maternelle + Number(r.maternelle || 0),
+      primaire: acc.primaire + Number(r.primaire || 0),
+      primairePlus: acc.primairePlus + Number(r.primairePlus || 0),
+      dessert: acc.dessert + r.dessert,
+    }),
+    { soupeCommandee: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 }
+  );
+  totals.soupeTotale = round2(totals.soupeCommandee + totals.soupeIncluse);
+
+  const m = menus[j.id];
+
+  if (!rows.length) {
+    preview.innerHTML = `<p class="help-text">Aucune commande pour ${j.label.toLowerCase()}.</p>`;
+    return;
+  }
+
+  preview.innerHTML = `
+    <div class="day-card">
+      <p class="day-card-title" style="margin-bottom:10px">Menu du ${j.label.toLowerCase()}</p>
+      <div class="field-grid" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:4px">
+        <div class="field-item"><label>Soupe</label><input type="text" id="menu-soupe" value="${m.soupe}" placeholder="ex. Potage carottes" /></div>
+        <div class="field-item"><label>Plat</label><input type="text" id="menu-plat" value="${m.plat}" placeholder="ex. Boulettes sauce tomate" /></div>
+        <div class="field-item"><label>Dessert</label><input type="text" id="menu-dessert" value="${m.dessert}" placeholder="ex. Compote de pommes" /></div>
+      </div>
+      <p class="help-text-small" style="margin-top:8px">Ce menu sera repris sur les fiches imprimées de ce jour.</p>
+    </div>
+
+    <p class="section-title" style="border-top:none;padding-top:6px">Fiche générale — toutes les écoles</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="school-col">École</th><th>Soupe cmd.</th><th>Soupe incl.</th><th>Soupe tot.</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr><td class="school-col">${isDayCorrected(r.name, j.id) ? '<span style="color:#a3402e;font-weight:700">⚠️ Attention</span> ' : ""}${r.name}</td><td>${round2(r.soupeCommandee)}</td><td>${round2(r.soupeIncluse)}</td><td>${round2(r.soupeTotale)}</td><td>${r.maternelle || 0}</td><td>${r.primaire || 0}</td><td>${r.primairePlus || 0}</td><td>${r.dessert}</td></tr>`).join("")}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight:600;border-top:2px solid #24302a">
+            <td class="school-col">Total</td><td>${round2(totals.soupeCommandee)}</td><td>${round2(totals.soupeIncluse)}</td><td>${totals.soupeTotale}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:12px" id="btn-print-general">🖨️ Imprimer la fiche générale</button>
+
+    <p class="section-title">Fiches individuelles — une par école</p>
+    <p class="help-text-small" style="margin-top:-6px">Avec menu, quantités et cases d'appréciation à cocher par l'école.</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px">
+      <button class="link-btn" id="btn-toggle-all-schools">Tout sélectionner</button>
+      <button class="primary-btn" style="width:auto;padding:9px 16px" id="btn-print-selection">🖨️ Imprimer la sélection (<span id="selection-count">0</span>)</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${rows.map((r) => `
+        <label style="display:flex;justify-content:space-between;align-items:center;border:1px solid #ddd6c4;border-radius:9px;padding:10px 14px;cursor:pointer">
+          <span style="display:flex;align-items:center;gap:10px">
+            <input type="checkbox" class="school-select-checkbox" data-school="${r.name}" style="width:17px;height:17px;accent-color:#c9a227" />
+            <span style="font-weight:500">${r.name}</span>
+          </span>
+          <button class="link-btn" data-print-individual="${r.name}" onclick="event.stopPropagation()">🖨️ Imprimer seule</button>
+        </label>
+      `).join("")}
+    </div>
+  `;
+
+  document.getElementById("menu-soupe").addEventListener("input", (e) => (menus[j.id].soupe = e.target.value));
+  document.getElementById("menu-plat").addEventListener("input", (e) => (menus[j.id].plat = e.target.value));
+  document.getElementById("menu-dessert").addEventListener("input", (e) => (menus[j.id].dessert = e.target.value));
+
+  document.getElementById("btn-print-general").addEventListener("click", () => printGeneralSheet(j, rows, totals));
+  document.querySelectorAll("[data-print-individual]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = rows.find((r) => r.name === btn.dataset.printIndividual);
+      printIndividualSheet(j, row);
+    });
+  });
+
+  const checkboxes = document.querySelectorAll(".school-select-checkbox");
+  function updateSelectionCount() {
+    const n = document.querySelectorAll(".school-select-checkbox:checked").length;
+    document.getElementById("selection-count").textContent = n;
+  }
+  checkboxes.forEach((cb) => cb.addEventListener("change", updateSelectionCount));
+
+  document.getElementById("btn-toggle-all-schools").addEventListener("click", (e) => {
+    const allChecked = Array.from(checkboxes).every((cb) => cb.checked);
+    checkboxes.forEach((cb) => (cb.checked = !allChecked));
+    e.target.textContent = allChecked ? "Tout sélectionner" : "Tout désélectionner";
+    updateSelectionCount();
+  });
+
+  document.getElementById("btn-print-selection").addEventListener("click", () => {
+    const selectedNames = Array.from(document.querySelectorAll(".school-select-checkbox:checked")).map((cb) => cb.dataset.school);
+    if (!selectedNames.length) return;
+    const selectedRows = rows.filter((r) => selectedNames.includes(r.name));
+    printMultipleIndividualSheets(j, selectedRows);
+  });
+}
+
+function printGeneralSheet(j, rows, totals) {
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiche générale ${j.label} ${dateLabel}</title>
+      <style>
+        body { font-family: sans-serif; padding: 24px; color: #222; }
+        h1 { font-size: 20px; margin-bottom: 4px; }
+        p.sub { color: #666; margin-top: 0; margin-bottom: 24px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { border: 1px solid #ccc; padding: 7px 8px; text-align: left; }
+        th { background: #f2efe5; }
+        tfoot td { font-weight: bold; border-top: 2px solid #222; }
+        td:not(:first-child), th:not(:first-child) { text-align: center; }
+      </style>
+    </head>
+    <body>
+      <h1>Fiche de préparation — ${j.label} ${dateLabel}</h1>
+      <p class="sub">Générée le ${new Date().toLocaleString("fr-FR")} — soupe incluse et dessert calculés automatiquement (0,2 L et 1 par repas)</p>
+      <table>
+        <thead><tr><th>École</th><th>Soupe cmd. (L)</th><th>Soupe incl. (L)</th><th>Soupe tot. (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr><td>${isDayCorrected(r.name, j.id) ? "⚠️ Attention " : ""}${r.name}</td><td>${round2(r.soupeCommandee)}</td><td>${round2(r.soupeIncluse)}</td><td>${round2(r.soupeTotale)}</td><td>${r.maternelle || 0}</td><td>${r.primaire || 0}</td><td>${r.primairePlus || 0}</td><td>${r.dessert}</td></tr>`).join("")}
+        </tbody>
+        <tfoot>
+          <tr><td>Total</td><td>${round2(totals.soupeCommandee)}</td><td>${round2(totals.soupeIncluse)}</td><td>${totals.soupeTotale}</td><td>${totals.maternelle}</td><td>${totals.primaire}</td><td>${totals.primairePlus}</td><td>${totals.dessert}</td></tr>
+        </tfoot>
+      </table>
+      <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function individualSheetBody(j, row, m, dateLabel, pageBreak) {
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const smileyRow = (label) => `
+    <tr>
+      <td style="text-align:left;font-weight:500">${label}</td>
+      <td style="font-size:22px">☐ 😊</td>
+      <td style="font-size:22px">☐ 😐</td>
+      <td style="font-size:22px">☐ 😞</td>
+    </tr>
+  `;
+  return `
+    <div style="${pageBreak ? "page-break-after: always;" : ""}">
+      <h1>Fiche de livraison — ${row.name}</h1>
+      <p class="sub">${j.label} ${dateLabel} — générée le ${new Date().toLocaleString("fr-FR")}</p>
+
+      <div class="menu-box">
+        <p><strong>Soupe :</strong> ${m.soupe || "—"}</p>
+        <p><strong>Plat :</strong> ${m.plat || "—"}</p>
+        <p><strong>Dessert :</strong> ${m.dessert || "—"}</p>
+      </div>
+
+      <h2>Quantités</h2>
+      <table>
+        <thead><tr><th>Soupe cmd. (L)</th><th>Soupe incl. (L)</th><th>Maternelle</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+        <tbody>
+          <tr><td>${round2(row.soupeCommandee)}</td><td>${round2(row.soupeIncluse)}</td><td>${row.maternelle || 0}</td><td>${row.primaire || 0}</td><td>${row.primairePlus || 0}</td><td>${row.dessert}</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Appréciation (à remplir par l'école)</h2>
+      <table class="appr-table">
+        ${smileyRow("Quantité")}
+        ${smileyRow("Chaleur")}
+        ${smileyRow("Appréciation générale")}
+      </table>
+    </div>
+  `;
+}
+
+const SHEET_STYLE = `
+  body { font-family: sans-serif; padding: 28px; color: #222; }
+  h1 { font-size: 21px; margin-bottom: 2px; }
+  h2 { font-size: 16px; margin-top: 28px; margin-bottom: 8px; }
+  p.sub { color: #666; margin-top: 0; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
+  th, td { border: 1px solid #ccc; padding: 8px 8px; }
+  th { background: #f2efe5; text-align: center; }
+  td:not(:first-child) { text-align: center; }
+  .menu-box { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; background: #fafafa; }
+  .menu-box p { margin: 4px 0; }
+  .appr-table td { text-align: center; }
+  .appr-table td:first-child { text-align: left; }
+`;
+
+function printIndividualSheet(j, row) {
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const m = menus[j.id];
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiche ${row.name} — ${j.label} ${dateLabel}</title>
+      <style>${SHEET_STYLE}</style>
+    </head>
+    <body>
+      ${individualSheetBody(j, row, m, dateLabel, false)}
+      <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function printMultipleIndividualSheets(j, rows) {
+  const dateLabel = shortDateLabel(dateForDayOfWeek(displayedMonday(), j.id));
+  const m = menus[j.id];
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+      <meta charset="UTF-8" />
+      <title>Fiches individuelles — ${j.label} ${dateLabel} (${rows.length} écoles)</title>
+      <style>${SHEET_STYLE}</style>
+    </head>
+    <body>
+      ${rows.map((row, i) => individualSheetBody(j, row, m, dateLabel, i < rows.length - 1)).join("")}
+      <scr${""}ipt>window.onload = () => window.print();<\/scr${""}ipt>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+// ---------- Outils cuisine : commande manquante + encodage mensuel ----------
+let schoolsDirectory = null;
+let showAddMissing = false;
+let showMonthEncode = false;
+let monthEncodeSchool = "";
+let monthEncodeSchoolIsNew = false;
+let monthEncodeNewEmail = "";
+let monthEncodeMonth = "";
+let monthEncodeDefaults = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+let monthEncodeDays = null;
+
+async function loadSchoolsDirectory() {
+  try {
+    const res = await fetch(`/api/schools?code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    schoolsDirectory = data.ok ? data.schools : [];
+  } catch (e) {
+    schoolsDirectory = [];
+  }
+}
+
+function adminInputStyle() {
+  return "width:56px;padding:4px 6px;font-family:'IBM Plex Mono',monospace;border:1px solid #ddd6c4;border-radius:6px";
+}
+
+function renderAddMissingSection() {
+  if (!showAddMissing) {
+    return `<div style="margin-bottom:14px"><button class="link-btn" data-action="toggle-add-missing">➕ Ajouter une commande manquante</button></div>`;
+  }
+  const dir = schoolsDirectory || [];
+  const alreadyOrdered = new Set(currentOrders.map((o) => o.schoolName.toLowerCase()));
+  const options = dir
+    .filter((s) => !alreadyOrdered.has((s.school_name || "").toLowerCase()))
+    .map((s) => `<option value="${s.school_name}">${s.school_name}</option>`)
+    .join("");
+  return `
+    <div class="school-block" style="border-color:#c9a227;margin-bottom:14px">
+      <div class="school-block-head">
+        <span class="school-name">➕ Ajouter une commande manquante</span>
+        <button class="link-btn" data-action="toggle-add-missing">Fermer</button>
+      </div>
+      <p class="help-text-small">Pour une école qui n'a pas commandé à temps cette semaine (${weekLabelFor(displayedMonday())}). Chaque quantité saisie est journalisée comme une rectification.</p>
+      <div class="field-grid" style="margin-bottom:12px">
+        <div class="field-item">
+          <label>École</label>
+          <select id="missing-school-select">
+            <option value="">— Choisir —</option>
+            ${options}
+            <option value="__new__">Autre / nouvelle école…</option>
+          </select>
+        </div>
+        <div class="field-item" id="missing-new-name-wrap" style="display:none">
+          <label>Nom de l'école</label>
+          <input type="text" id="missing-new-name" />
+        </div>
+        <div class="field-item" id="missing-new-email-wrap" style="display:none">
+          <label>Email de l'école</label>
+          <input type="email" id="missing-new-email" />
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+          <tbody>
+            ${JOURS.map((j) => `<tr>
+              <td class="school-col">${dayHeader(j)}</td>
+              <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="soupe" value="0" style="${adminInputStyle()}" /></td>
+              <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="maternelle" value="0" style="${adminInputStyle()}" /></td>
+              <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="primaire" value="0" style="${adminInputStyle()}" /></td>
+              <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="primairePlus" value="0" style="${adminInputStyle()}" /></td>
+              <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="dessert" value="0" style="${adminInputStyle()}" /></td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+      <p class="help-text-small">Le dessert n'est pas calculé automatiquement ici : indiquez le nombre voulu (généralement 1 par repas).</p>
+      <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:10px" id="btn-create-missing">Créer la commande</button>
+      <p class="error-text" id="missing-error" style="display:none"></p>
+    </div>
+  `;
+}
+
+async function createMissingOrder() {
+  const errEl = document.getElementById("missing-error");
+  errEl.style.display = "none";
+  const select = document.getElementById("missing-school-select");
+  let schoolName = select.value;
+  if (schoolName === "__new__") {
+    schoolName = document.getElementById("missing-new-name").value.trim();
+  }
+  if (!schoolName) {
+    errEl.textContent = "Choisissez ou indiquez une école.";
+    errEl.style.display = "block";
+    return;
+  }
+  const week = emptyWeek();
+  document.querySelectorAll(".missing-input").forEach((input) => {
+    const day = input.dataset.day;
+    const field = input.dataset.field;
+    const v = Math.max(0, parseFloat(input.value.replace(",", ".")) || 0);
+    week[day][field] = v;
+  });
+  try {
+    const res = await fetch("/api/orders/admin-edit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, schoolName, weekKey: weekKeyFor(displayedMonday()), week }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error || "Erreur lors de la création.";
+      errEl.style.display = "block";
+      return;
+    }
+    showAddMissing = false;
+    schoolsDirectory = null;
+    await load();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = "block";
+  }
+}
+
+function renderMonthEncodeSection() {
+  if (!showMonthEncode) {
+    return `<div style="margin-bottom:14px"><button class="link-btn" data-action="toggle-month-encode">📅 Encoder un mois pour une école</button></div>`;
+  }
+  const dir = schoolsDirectory || [];
+  const options = dir
+    .map((s) => `<option value="${s.school_name}" ${!monthEncodeSchoolIsNew && monthEncodeSchool === s.school_name ? "selected" : ""}>${s.school_name}</option>`)
+    .join("");
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  let daysHtml = "";
+  if (monthEncodeDays) {
+    daysHtml = `
+      <div class="table-scroll" style="margin-top:14px">
+        <table>
+          <thead><tr><th></th><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+          <tbody>
+            ${monthEncodeDays.map((d, i) => `<tr style="${d.holiday ? "opacity:.5" : ""}">
+              <td><input type="checkbox" class="month-day-checkbox" data-idx="${i}" ${d.include ? "checked" : ""} ${d.holiday ? "disabled" : ""} style="width:17px;height:17px;accent-color:#c9a227" /></td>
+              <td class="school-col">${d.label}${d.holiday ? ` <span style="color:#a3402e;font-size:12px">(vacances — ${d.holiday})</span>` : ""}</td>
+              <td>${round2(d.soupe)}</td><td>${d.maternelle}</td><td>${d.primaire}</td><td>${d.primairePlus}</td><td>${d.dessert}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+      <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:12px" id="btn-submit-month-encode">Valider l'encodage du mois</button>
+    `;
+  }
+
+  return `
+    <div class="school-block" style="border-color:#c9a227;margin-bottom:14px">
+      <div class="school-block-head">
+        <span class="school-name">📅 Encoder un mois pour une école</span>
+        <button class="link-btn" data-action="toggle-month-encode">Fermer</button>
+      </div>
+      <p class="help-text-small">Propose les mêmes quantités pour tous les jours d'école du mois choisi. Les vacances scolaires sont automatiquement exclues. Décochez un jour pour le retirer avant de valider.</p>
+      <div class="field-grid" style="margin-bottom:12px">
+        <div class="field-item">
+          <label>École</label>
+          <select id="month-school-select">
+            <option value="">— Choisir —</option>
+            ${options}
+            <option value="__new__" ${monthEncodeSchoolIsNew ? "selected" : ""}>Autre / nouvelle école…</option>
+          </select>
+        </div>
+        <div class="field-item" id="month-new-name-wrap" style="display:${monthEncodeSchoolIsNew ? "block" : "none"}">
+          <label>Nom de l'école</label>
+          <input type="text" id="month-new-name" value="${monthEncodeSchoolIsNew ? monthEncodeSchool : ""}" />
+        </div>
+        <div class="field-item" id="month-new-email-wrap" style="display:${monthEncodeSchoolIsNew ? "block" : "none"}">
+          <label>Email de l'école</label>
+          <input type="email" id="month-new-email" value="${monthEncodeNewEmail}" />
+        </div>
+        <div class="field-item">
+          <label>Mois</label>
+          <input type="month" id="month-picker" value="${monthEncodeMonth}" />
+        </div>
+      </div>
+      <p class="field-label">Quantités par défaut (appliquées à tous les jours cochés)</p>
+      <div class="field-grid" style="margin-bottom:12px">
+        <div class="field-item"><label>Soupe (L)</label><input type="text" inputmode="decimal" id="month-default-soupe" value="${monthEncodeDefaults.soupe}" /></div>
+        <div class="field-item"><label>Maternelle</label><input type="text" inputmode="decimal" id="month-default-maternelle" value="${monthEncodeDefaults.maternelle}" /></div>
+        <div class="field-item"><label>Primaire</label><input type="text" inputmode="decimal" id="month-default-primaire" value="${monthEncodeDefaults.primaire}" /></div>
+        <div class="field-item"><label>Primaire +</label><input type="text" inputmode="decimal" id="month-default-primairePlus" value="${monthEncodeDefaults.primairePlus}" /></div>
+        <div class="field-item"><label>Dessert</label><input type="text" inputmode="decimal" id="month-default-dessert" value="${monthEncodeDefaults.dessert}" /></div>
+      </div>
+      <button class="link-btn" id="btn-generate-month-encode">Proposer l'encodage</button>
+      ${daysHtml}
+      <p class="error-text" id="month-encode-error" style="display:none"></p>
+    </div>
+  `;
+}
+
+function parseDecimalAdmin(str) {
+  const v = parseFloat(String(str).replace(",", ".").trim());
+  return isNaN(v) || v < 0 ? 0 : v;
+}
+
+function generateMonthEncodeDays() {
+  const errEl = document.getElementById("month-encode-error");
+  errEl.style.display = "none";
+
+  const select = document.getElementById("month-school-select");
+  monthEncodeSchoolIsNew = select.value === "__new__";
+  monthEncodeSchool = monthEncodeSchoolIsNew ? document.getElementById("month-new-name").value.trim() : select.value;
+  monthEncodeNewEmail = monthEncodeSchoolIsNew ? document.getElementById("month-new-email").value.trim() : "";
+
+  if (!monthEncodeSchool) {
+    errEl.textContent = "Choisissez ou indiquez une école.";
+    errEl.style.display = "block";
+    return;
+  }
+
+  const monthVal = document.getElementById("month-picker").value;
+  if (!monthVal) {
+    errEl.textContent = "Choisissez un mois.";
+    errEl.style.display = "block";
+    return;
+  }
+  monthEncodeMonth = monthVal;
+  monthEncodeDefaults = {
+    soupe: parseDecimalAdmin(document.getElementById("month-default-soupe").value),
+    maternelle: parseDecimalAdmin(document.getElementById("month-default-maternelle").value),
+    primaire: parseDecimalAdmin(document.getElementById("month-default-primaire").value),
+    primairePlus: parseDecimalAdmin(document.getElementById("month-default-primairePlus").value),
+    dessert: parseDecimalAdmin(document.getElementById("month-default-dessert").value),
+  };
+
+  const [year, month] = monthVal.split("-").map((n) => parseInt(n, 10));
+  const firstDay = new Date(year, month - 1, 1);
+  const lastDay = new Date(year, month, 0);
+  const dayIdMap = { 1: "lundi", 2: "mardi", 4: "jeudi", 5: "vendredi" };
+  const days = [];
+  for (let d = new Date(firstDay); d <= lastDay; d.setDate(d.getDate() + 1)) {
+    const dayId = dayIdMap[d.getDay()];
+    if (!dayId) continue;
+    const date = new Date(d);
+    const h = holidayFor(date);
+    const monday = new Date(date);
+    monday.setDate(date.getDate() - (DAY_OFFSET[dayId] || 0));
+    days.push({
+      dayId,
+      weekKey: weekKeyFor(monday),
+      label: `${JOURS.find((j) => j.id === dayId).label} ${shortDateLabel(date)}`,
+      include: !h,
+      holiday: h ? h.label : null,
+      soupe: monthEncodeDefaults.soupe,
+      maternelle: monthEncodeDefaults.maternelle,
+      primaire: monthEncodeDefaults.primaire,
+      primairePlus: monthEncodeDefaults.primairePlus,
+      dessert: monthEncodeDefaults.dessert,
+    });
+  }
+  monthEncodeDays = days;
+  render();
+}
+
+async function submitMonthEncode() {
+  const errEl = document.getElementById("month-encode-error");
+  errEl.style.display = "none";
+  const included = (monthEncodeDays || []).filter((d) => d.include && !d.holiday);
+  if (!included.length) {
+    errEl.textContent = "Aucun jour sélectionné.";
+    errEl.style.display = "block";
+    return;
+  }
+  const btn = document.getElementById("btn-submit-month-encode");
+  btn.disabled = true;
+  btn.textContent = "Envoi…";
+  try {
+    const res = await fetch("/api/orders/admin-bulk-month", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: kitchenCode,
+        schoolName: monthEncodeSchool,
+        days: included.map((d) => ({
+          weekKey: d.weekKey,
+          dayId: d.dayId,
+          soupe: d.soupe,
+          maternelle: d.maternelle,
+          primaire: d.primaire,
+          primairePlus: d.primairePlus,
+          dessert: d.dessert,
+        })),
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error || "Erreur lors de l'encodage.";
+      errEl.style.display = "block";
+      btn.disabled = false;
+      btn.textContent = "Valider l'encodage du mois";
+      return;
+    }
+    showMonthEncode = false;
+    monthEncodeDays = null;
+    schoolsDirectory = null;
+    await load();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = "block";
+    btn.disabled = false;
+    btn.textContent = "Valider l'encodage du mois";
+  }
+}
+
+function attachAdminToolsHandlers() {
+  document.querySelectorAll('[data-action="toggle-add-missing"]').forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      showAddMissing = !showAddMissing;
+      if (showAddMissing) {
+        showMonthEncode = false;
+        if (!schoolsDirectory) await loadSchoolsDirectory();
+      }
+      render();
+    });
+  });
+
+  document.querySelectorAll('[data-action="toggle-month-encode"]').forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      showMonthEncode = !showMonthEncode;
+      if (showMonthEncode) {
+        showAddMissing = false;
+        monthEncodeDays = null;
+        if (!schoolsDirectory) await loadSchoolsDirectory();
+      }
+      render();
+    });
+  });
+
+  const missingSelect = document.getElementById("missing-school-select");
+  if (missingSelect) {
+    missingSelect.addEventListener("change", () => {
+      const isNew = missingSelect.value === "__new__";
+      document.getElementById("missing-new-name-wrap").style.display = isNew ? "block" : "none";
+      document.getElementById("missing-new-email-wrap").style.display = isNew ? "block" : "none";
+    });
+  }
+  const btnCreateMissing = document.getElementById("btn-create-missing");
+  if (btnCreateMissing) btnCreateMissing.addEventListener("click", createMissingOrder);
+
+  const monthSelect = document.getElementById("month-school-select");
+  if (monthSelect) {
+    monthSelect.addEventListener("change", () => {
+      const isNew = monthSelect.value === "__new__";
+      document.getElementById("month-new-name-wrap").style.display = isNew ? "block" : "none";
+      document.getElementById("month-new-email-wrap").style.display = isNew ? "block" : "none";
+    });
+  }
+  const genBtn = document.getElementById("btn-generate-month-encode");
+  if (genBtn) genBtn.addEventListener("click", generateMonthEncodeDays);
+  const submitBtn = document.getElementById("btn-submit-month-encode");
+  if (submitBtn) submitBtn.addEventListener("click", submitMonthEncode);
+  document.querySelectorAll(".month-day-checkbox").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const idx = parseInt(cb.dataset.idx, 10);
+      if (monthEncodeDays[idx]) monthEncodeDays[idx].include = cb.checked;
+    });
+  });
+}
+
+async function saveEdit(idx) {
+  const order = currentOrders[idx];
+  const inputs = document.querySelectorAll(".edit-input");
+  const updatedWeek = JSON.parse(JSON.stringify(order.week));
+  inputs.forEach((input) => {
+    const day = input.dataset.day;
+    const field = input.dataset.field;
+    const raw = input.value.replace(",", ".").trim();
+    const v = Math.max(0, parseFloat(raw) || 0);
+    if (!updatedWeek[day]) updatedWeek[day] = emptyDay();
+    updatedWeek[day][field] = v;
+  });
+
+  const errEl = document.getElementById(`edit-error-${idx}`);
+  errEl.style.display = "none";
+  try {
+    const res = await fetch("/api/orders/admin-edit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: kitchenCode,
+        schoolName: order.schoolName,
+        weekKey: weekKeyFor(displayedMonday()),
+        week: updatedWeek,
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error || "Erreur lors de la modification.";
+      errEl.style.display = "block";
+      return;
+    }
+    editingSchool = null;
+    await load();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = "block";
+  }
+}
+
+document.getElementById("btn-refresh").addEventListener("click", tryLoad);
+</script>
+</body>
+</html>
