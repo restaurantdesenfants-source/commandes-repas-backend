@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Menu du mois</title>
+<link rel="stylesheet" href="/style.css" />
+<style>
+  .month-tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 4px 0 18px;
+  }
+  .month-tab {
+    padding: 8px 16px;
+    border-radius: 20px;
+    border: 1px solid #ddd6c4;
+    background: #fff;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+  }
+  .month-tab.active {
+    background: #24302a;
+    color: #fff;
+    border-color: #24302a;
+  }
+  .menu-image-wrap {
+    display: none;
+    justify-content: center;
+    padding: 8px 0 32px;
+  }
+  .menu-image-wrap.active {
+    display: flex;
+  }
+  .menu-image-wrap img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">🌾 Fiche de commande</div>
+    <nav class="tabs">
+      <a href="/">École</a>
+      <a href="/menu.html" class="active">Menu</a>
+      <a href="/cuisine.html">Cuisine</a>
+      <a href="/facturation.html">Facturation</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <h1>Menu du mois</h1>
+    <p class="help-text">Retrouvez ci-dessous les menus en vigueur. La composition des plats est susceptible de varier.</p>
+  </div>
+
+  <!--
+    Cette page s'adapte TOUTE SEULE, aucun code à changer chaque mois.
+    Pour ajouter ou remplacer le menu d'un mois : dépose simplement l'image
+    à la racine de public/, nommée AAAA-MM.jpg (ex: 2026-11.jpg pour novembre
+    2026, 2027-01.jpg pour janvier 2027). Dès que le fichier existe, son onglet
+    apparaît automatiquement ici.
+  -->
+  <div class="month-tabs" id="month-tabs"></div>
+  <div id="month-images"></div>
+</main>
+
+<script>
+  const MONTH_LABELS = [
+    "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
+    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre",
+  ];
+
+  // Génère les mois candidats à vérifier : de 2 mois avant aujourd'hui à
+  // 12 mois après. Recalculé à chaque visite, donc ça glisse tout seul avec
+  // le temps — jamais besoin d'y retoucher.
+  function candidateMonths() {
+    const now = new Date();
+    const months = [];
+    for (let offset = -2; offset <= 12; offset++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+      months.push({ year: d.getFullYear(), month: d.getMonth() + 1 });
+    }
+    return months;
+  }
+
+  async function fileExists(url) {
+    try {
+      const res = await fetch(url, { method: "HEAD", cache: "no-store" });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function init() {
+    const tabsEl = document.getElementById("month-tabs");
+    const imagesEl = document.getElementById("month-images");
+    imagesEl.innerHTML = `<p class="help-text">Chargement…</p>`;
+
+    const candidates = candidateMonths();
+    const checks = await Promise.all(
+      candidates.map(async (c) => {
+        const mm = String(c.month).padStart(2, "0");
+        const file = `/${c.year}-${mm}.jpg`;
+        const exists = await fileExists(file);
+        return exists ? { label: `${MONTH_LABELS[c.month - 1]} ${c.year}`, file, year: c.year, month: c.month } : null;
+      })
+    );
+    const found = checks.filter(Boolean).sort((a, b) => a.year - b.year || a.month - b.month);
+
+    imagesEl.innerHTML = "";
+    tabsEl.innerHTML = "";
+
+    if (!found.length) {
+      imagesEl.innerHTML = `<p class="help-text">Aucun menu disponible pour le moment.</p>`;
+      return;
+    }
+
+    // Onglet actif par défaut : le mois en cours s'il existe, sinon le premier trouvé.
+    const now = new Date();
+    let defaultIdx = found.findIndex((m) => m.year === now.getFullYear() && m.month === now.getMonth() + 1);
+    if (defaultIdx === -1) defaultIdx = 0;
+
+    found.forEach((m, i) => {
+      const tab = document.createElement("button");
+      tab.className = "month-tab" + (i === defaultIdx ? " active" : "");
+      tab.textContent = m.label;
+      tab.dataset.idx = i;
+      tabsEl.appendChild(tab);
+
+      const wrap = document.createElement("div");
+      wrap.className = "menu-image-wrap" + (i === defaultIdx ? " active" : "");
+      wrap.dataset.idx = i;
+      wrap.innerHTML = `<img src="${m.file}" alt="Menu ${m.label}" />`;
+      imagesEl.appendChild(wrap);
+    });
+
+    tabsEl.addEventListener("click", (e) => {
+      const btn = e.target.closest(".month-tab");
+      if (!btn) return;
+      document.querySelectorAll(".month-tab").forEach((t) => t.classList.remove("active"));
+      document.querySelectorAll(".menu-image-wrap").forEach((w) => w.classList.remove("active"));
+      btn.classList.add("active");
+      document.querySelector(`.menu-image-wrap[data-idx="${btn.dataset.idx}"]`).classList.add("active");
+    });
+  }
+
+  init();
+</script>
+</body>
+</html>
