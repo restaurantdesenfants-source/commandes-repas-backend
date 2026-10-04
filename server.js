@@ -5,7 +5,9 @@
 //
 // Réglages via variables d'environnement dans Render :
 // BREVO_API_KEY, SENDER_EMAIL, SENDER_NAME, KITCHEN_CODE,
-// SUPABASE_URL, SUPABASE_SERVICE_KEY
+// SUPABASE_URL, SUPABASE_SERVICE_KEY, KITCHEN_EMAIL (adresse qui reçoit une copie
+// des emails école et les récapitulatifs de modification manuelle — facultative :
+// si absente, ces copies/notifications sont simplement désactivées)
 
 const express = require("express");
 const cors = require("cors");
@@ -444,6 +446,7 @@ async function sendConfirmationEmail({ schoolEmail, schoolName, weekLabel, week,
     body: JSON.stringify({
       sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
       to: [{ email: schoolEmail, name: schoolName }],
+      ...(process.env.KITCHEN_EMAIL ? { cc: [{ email: process.env.KITCHEN_EMAIL }] } : {}),
       subject: `Confirmation de commande - ${schoolName} - semaine du ${weekLabel}`,
       htmlContent: html,
     }),
@@ -529,6 +532,7 @@ async function sendCorrectionEmail({ schoolEmail, schoolName, dayLabel, delta, n
     body: JSON.stringify({
       sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
       to: [{ email: schoolEmail, name: schoolName }],
+      ...(process.env.KITCHEN_EMAIL ? { cc: [{ email: process.env.KITCHEN_EMAIL }] } : {}),
       subject: `Rectification de commande - ${schoolName} - ${dayLabel}`,
       htmlContent: html,
     }),
@@ -537,6 +541,73 @@ async function sendCorrectionEmail({ schoolEmail, schoolName, dayLabel, delta, n
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Brevo a refusé l'envoi : ${errText}`);
+  }
+  return res.json();
+}
+
+// Email envoyé UNIQUEMENT à la cuisine (jamais à l'école) quand une modification
+// manuelle a été faite depuis la Cuisine (Modifier / commande manquante / encodage
+// mensuel). Liste chaque jour touché, par semaine, avec les valeurs avant → après.
+async function sendAdminEditKitchenEmail({ schoolName, allChangedDays }) {
+  const kitchenEmail = process.env.KITCHEN_EMAIL;
+  if (!kitchenEmail || !allChangedDays.length) return;
+
+  const fieldLabels = [
+    ["soupe", "Soupe"],
+    ["maternelle", "Maternelle"],
+    ["primaire", "Primaire"],
+    ["primairePlus", "Primaire +"],
+    ["dessert", "Dessert"],
+  ];
+
+  const lignes = allChangedDays
+    .map((d) => {
+      const parts = fieldLabels
+        .map(([key, label]) => {
+          const delta = Number(d.delta[key] || 0);
+          if (!delta) return null;
+          return `${label} : ${d.oldValues[key] || 0} → ${d.newValues[key] || 0}`;
+        })
+        .filter(Boolean)
+        .join(" · ");
+      return `<tr>
+        <td style="padding:6px 10px;border:1px solid #ddd">${d.weekKey}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd">${d.dayLabel}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd">${parts}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const html = `
+    <p>Bonjour,</p>
+    <p>Une modification manuelle vient d'être enregistrée depuis la Cuisine pour <strong>${schoolName}</strong> (l'école n'a pas été notifiée) :</p>
+    <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
+      <tr style="background:#f2efe5">
+        <th style="padding:6px 10px;border:1px solid #ddd">Semaine</th>
+        <th style="padding:6px 10px;border:1px solid #ddd">Jour</th>
+        <th style="padding:6px 10px;border:1px solid #ddd">Changements</th>
+      </tr>
+      ${lignes}
+    </table>
+  `;
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "api-key": process.env.BREVO_API_KEY,
+    },
+    body: JSON.stringify({
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
+      to: [{ email: kitchenEmail }],
+      subject: `Modification manuelle cuisine - ${schoolName}`,
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Brevo a refusé l'envoi (copie cuisine) : ${errText}`);
   }
   return res.json();
 }
@@ -759,8 +830,10 @@ async function applyAdminDayEdits(schoolName, weekKey, weekUpdates) {
     const school = await getSchool(nameLower);
     schoolEmailFallback = (school && school.school_email) || null;
   }
+  const finalSchoolName = row ? row.school_name : schoolName.trim();
   const oldWeek = (row && row.week) || emptyWeek();
   const mergedWeek = {};
+  const changedDays = []; // renvoyé à l'appelant pour notifier la cuisine par email
   for (const j of JOURS) {
     const oldV = oldWeek[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
     const providedV = weekUpdates[j.id] || oldV;
@@ -780,23 +853,25 @@ async function applyAdminDayEdits(schoolName, weekKey, weekUpdates) {
     const hasChange = Object.values(delta).some((v) => v !== 0);
     if (hasChange) {
       await logCorrection({
-        school_name: row ? row.school_name : schoolName.trim(),
+        school_name: finalSchoolName,
         week_key: weekKey,
         day_id: j.id,
         delta,
         new_values: { ...newV, __source: "cuisine" },
       });
+      changedDays.push({ weekKey, dayId: j.id, dayLabel: j.label, oldValues: oldV, newValues: newV, delta });
     }
   }
   await upsertOrder({
     week_key: weekKey,
     school_name_lower: nameLower,
-    school_name: row ? row.school_name : schoolName.trim(),
+    school_name: finalSchoolName,
     school_email: row ? row.school_email : schoolEmailFallback,
     week: mergedWeek,
     comment: row ? row.comment : "",
     submitted_at: row ? row.submitted_at : null,
   });
+  return { schoolName: finalSchoolName, changedDays };
 }
 
 // Modification manuelle des quantités par la cuisine (correction d'un bug signalé
@@ -813,8 +888,15 @@ app.post("/api/orders/admin-edit", async (req, res) => {
     if (!schoolName || !weekKey || !week) {
       return res.status(400).json({ ok: false, error: "Informations manquantes." });
     }
-    await applyAdminDayEdits(schoolName, weekKey, week);
-    res.json({ ok: true });
+    const { schoolName: finalSchoolName, changedDays } = await applyAdminDayEdits(schoolName, weekKey, week);
+    let kitchenEmailSent = false;
+    try {
+      await sendAdminEditKitchenEmail({ schoolName: finalSchoolName, allChangedDays: changedDays });
+      kitchenEmailSent = changedDays.length > 0;
+    } catch (e) {
+      console.error("Échec email cuisine (admin-edit) :", e.message);
+    }
+    res.json({ ok: true, kitchenEmailSent });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -848,10 +930,21 @@ app.post("/api/orders/admin-bulk-month", async (req, res) => {
       };
     }
     const weekKeys = Object.keys(byWeek);
+    let finalSchoolName = schoolName.trim();
+    const allChangedDays = [];
     for (const weekKey of weekKeys) {
-      await applyAdminDayEdits(schoolName, weekKey, byWeek[weekKey]);
+      const result = await applyAdminDayEdits(schoolName, weekKey, byWeek[weekKey]);
+      finalSchoolName = result.schoolName;
+      allChangedDays.push(...result.changedDays);
     }
-    res.json({ ok: true, weeksUpdated: weekKeys.length });
+    let kitchenEmailSent = false;
+    try {
+      await sendAdminEditKitchenEmail({ schoolName: finalSchoolName, allChangedDays });
+      kitchenEmailSent = allChangedDays.length > 0;
+    } catch (e) {
+      console.error("Échec email cuisine (bulk-month) :", e.message);
+    }
+    res.json({ ok: true, weeksUpdated: weekKeys.length, kitchenEmailSent });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
