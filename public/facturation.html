@@ -221,10 +221,85 @@ async function loadMonth() {
   }
 }
 
+let showOrderCheck = false;
+let orderCheckResult = null;
+
+function renderOrderCheckSection() {
+  if (!showOrderCheck) {
+    return `<div style="margin-bottom:14px"><button class="link-btn" data-action="toggle-order-check">🔍 Vérifier les commandes manquantes du mois</button></div>`;
+  }
+  let body = `<p class="help-text-small">Chargement…</p>`;
+  if (orderCheckResult === "error") {
+    body = `<p class="error-text">Erreur lors de la vérification.</p>`;
+  } else if (orderCheckResult) {
+    if (!orderCheckResult.issues.length) {
+      body = `<p class="help-text-small" style="color:#2f6b3a">✅ Toutes les écoles ont une vraie commande chaque semaine de ce mois.</p>`;
+    } else {
+      const bySchool = {};
+      orderCheckResult.issues.forEach((i) => {
+        if (!bySchool[i.schoolName]) bySchool[i.schoolName] = [];
+        bySchool[i.schoolName].push(i);
+      });
+      body = Object.entries(bySchool)
+        .map(([schoolName, list]) => `
+          <p class="note-tag" style="color:#a3402e">
+            ⚠️ <strong>${schoolName}</strong><br/>
+            ${list.map((i) => i.status === "missing" ? `${i.weekLabel} : aucune commande trouvée` : `${i.weekLabel} : commande encodée par la cuisine (pas de commande initiale de l'école)`).join("<br/>")}
+          </p>
+        `)
+        .join("");
+    }
+  }
+  return `
+    <div class="school-block" style="border-color:#c9a227;margin-bottom:14px">
+      <div class="school-block-head">
+        <span class="school-name">🔍 Vérifier les commandes manquantes du mois</span>
+        <button class="link-btn" data-action="toggle-order-check">Fermer</button>
+      </div>
+      <p class="help-text-small">Repère les écoles qui n'ont pas de vraie commande une semaine donnée de ${monthLabel(selectedMonth)} (semaine manquante, ou commande uniquement encodée à la main par la cuisine).</p>
+      ${body}
+    </div>
+  `;
+}
+
+function attachOrderCheckHandlers() {
+  document.querySelectorAll('[data-action="toggle-order-check"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      showOrderCheck = !showOrderCheck;
+      if (showOrderCheck && !orderCheckResult) {
+        renderMonth(lastMonthData);
+        runOrderCheck();
+      } else {
+        renderMonth(lastMonthData);
+      }
+    });
+  });
+}
+
+async function runOrderCheck() {
+  orderCheckResult = null;
+  renderMonth(lastMonthData);
+  try {
+    const res = await fetch(`/api/billing/order-check?code=${encodeURIComponent(kitchenCode)}&month=${encodeURIComponent(selectedMonth)}`);
+    const data = await res.json();
+    orderCheckResult = data.ok ? data : "error";
+  } catch (e) {
+    orderCheckResult = "error";
+  }
+  renderMonth(lastMonthData);
+}
+
+let lastMonthData = null;
+
 function renderMonth(data) {
+  lastMonthData = data;
   const el = document.getElementById("month-content");
   if (!data.schools.length) {
-    el.innerHTML = `<div class="empty-state">🧾<p class="help-text">Aucune commande pour ce mois.</p></div>`;
+    el.innerHTML = `
+      ${renderOrderCheckSection()}
+      <div class="empty-state">🧾<p class="help-text">Aucune commande pour ce mois.</p></div>
+    `;
+    attachOrderCheckHandlers();
     return;
   }
 
@@ -232,6 +307,7 @@ function renderMonth(data) {
   const entries = data.dessertSupplementEntries || [];
 
   let html = `
+    ${renderOrderCheckSection()}
     <div class="stat-grid">
       <div class="stat-card"><span class="stat-value">${data.totals.soupe} L</span><span class="stat-label">Soupe commandée</span></div>
       <div class="stat-card"><span class="stat-value">${data.totals.soupeIncluse || 0} L</span><span class="stat-label">Soupe incluse (0,2L/repas)</span></div>
@@ -260,6 +336,7 @@ function renderMonth(data) {
         <p class="help-text-small" style="margin-top:0">
           Maternelle : ${s.maternelle} · Primaire : ${s.primaire} · Primaire + : ${s.primairePlus} · Dessert : ${s.dessert || 0}
         </p>
+        <a class="link-btn" style="display:inline-block;margin-top:4px" href="/api/billing/school-pdf?code=${encodeURIComponent(kitchenCode)}&month=${encodeURIComponent(selectedMonth)}&schoolName=${encodeURIComponent(s.schoolName)}" target="_blank">📄 Télécharger le récapitulatif PDF</a>
 
         <p class="field-label" style="margin-top:14px">Suppléments dessert facturés — total : ${s.dessertSupplement || 0}</p>
         ${schoolEntries.length
@@ -322,6 +399,7 @@ function renderMonth(data) {
   }
 
   document.getElementById("month-content").innerHTML = html;
+  attachOrderCheckHandlers();
 
   document.querySelectorAll("[data-delete-school-month]").forEach((btn) => {
     btn.addEventListener("click", () => deleteSchoolMonth(btn.dataset.deleteSchoolMonth, btn));
