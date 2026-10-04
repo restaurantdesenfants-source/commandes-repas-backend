@@ -94,6 +94,7 @@ async function tryLoad() {
 
 let directorySchools = [];
 let showMergeSchools = false;
+let mergeResultHtml = ""; // conservé entre les rendus pour ne pas disparaître au rafraîchissement
 
 function renderMergePanel() {
   if (!showMergeSchools) {
@@ -119,7 +120,7 @@ function renderMergePanel() {
       </div>
       <button class="primary-btn" style="width:auto;padding:9px 16px" id="btn-merge-schools">Fusionner</button>
       <p class="error-text" id="merge-error" style="display:none"></p>
-      <div id="merge-result"></div>
+      <div id="merge-result">${mergeResultHtml}</div>
     </div>
   `;
 }
@@ -129,6 +130,7 @@ async function mergeSchools() {
   const resultEl = document.getElementById("merge-result");
   errEl.style.display = "none";
   resultEl.innerHTML = "";
+  mergeResultHtml = "";
   const fromId = document.getElementById("merge-from-select").value;
   const toId = document.getElementById("merge-to-select").value;
   if (!fromId || !toId) {
@@ -163,11 +165,11 @@ async function mergeSchools() {
       return;
     }
     if (data.conflictWeeks.length) {
-      resultEl.innerHTML = `<p class="note-tag" style="color:#a3402e">
-        ${data.movedWeeks} semaine(s) fusionnée(s). ⚠️ ${data.conflictWeeks.length} semaine(s) existaient déjà des deux côtés et n'ont PAS été fusionnées automatiquement (pour ne pas mélanger des chiffres) : à vérifier et corriger à la main en Cuisine pour "${data.toSchoolName}". "${data.fromSchoolName}" reste donc présente, avec uniquement ces semaines en conflit.
+      mergeResultHtml = `<p class="note-tag" style="color:#a3402e">
+        ${data.movedWeeks} semaine(s) fusionnée(s). ⚠️ ${data.conflictWeeks.length} semaine(s) existaient déjà des deux côtés et n'ont PAS été fusionnées automatiquement (pour ne pas mélanger des chiffres) : à vérifier et corriger à la main en Cuisine pour "${data.toSchoolName}". "${data.fromSchoolName}" reste donc présente, avec uniquement ces semaines en conflit. Semaines concernées : ${data.conflictWeeks.join(", ")}
       </p>`;
     } else {
-      resultEl.innerHTML = `<p class="note-tag" style="color:#2f6b3a">✅ Fusion complète : ${data.movedWeeks} semaine(s) transférée(s), "${data.fromSchoolName}" supprimée.</p>`;
+      mergeResultHtml = `<p class="note-tag" style="color:#2f6b3a">✅ Fusion complète : ${data.movedWeeks} semaine(s) transférée(s), "${data.fromSchoolName}" supprimée.</p>`;
     }
     btn.disabled = false;
     btn.textContent = "Fusionner";
