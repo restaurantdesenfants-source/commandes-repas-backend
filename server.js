@@ -1140,7 +1140,10 @@ app.get("/api/billing", async (req, res) => {
         };
       });
 
-    const schools = Object.values(bySchool).sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
+    const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    const schools = Object.values(bySchool)
+      .map((s) => ({ ...s, soupe: round2(s.soupe), soupeIncluse: round2(s.soupeIncluse) }))
+      .sort((a, b) => a.schoolName.localeCompare(b.schoolName, "fr"));
     const totals = schools.reduce(
       (acc, s) => ({
         soupe: acc.soupe + s.soupe,
@@ -1152,8 +1155,9 @@ app.get("/api/billing", async (req, res) => {
         dessertSupplement: acc.dessertSupplement + (s.dessertSupplement || 0),
       }),
       { soupe: 0, soupeIncluse: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0, dessertSupplement: 0 }
-
     );
+    totals.soupe = round2(totals.soupe);
+    totals.soupeIncluse = round2(totals.soupeIncluse);
 
     res.json({ ok: true, schools, totals, corrections: correctionsThisMonth, dessertSupplementEntries });
   } catch (e) {
