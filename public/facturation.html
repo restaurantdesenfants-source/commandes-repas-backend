@@ -92,17 +92,107 @@ async function tryLoad() {
   }
 }
 
+let directorySchools = [];
+let showMergeSchools = false;
+
+function renderMergePanel() {
+  if (!showMergeSchools) {
+    return `<div style="margin-bottom:14px"><button class="link-btn" data-action="toggle-merge-schools">🔗 Fusionner deux écoles en doublon</button></div>`;
+  }
+  const options = directorySchools.map((s) => `<option value="${s.id}">${s.schoolName} (${s.id})</option>`).join("");
+  return `
+    <div class="school-block" style="border-color:#c9a227;margin-bottom:14px">
+      <div class="school-block-head">
+        <span class="school-name">🔗 Fusionner deux écoles en doublon</span>
+        <button class="link-btn" data-action="toggle-merge-schools">Fermer</button>
+      </div>
+      <p class="help-text-small">À utiliser quand la même école apparaît deux fois (orthographe différente). Toutes les commandes, rectifications et suppléments de la première sont transférés vers la seconde, puis la première est supprimée.</p>
+      <div class="field-grid" style="margin-bottom:12px">
+        <div class="field-item">
+          <label>École en double (sera supprimée)</label>
+          <select id="merge-from-select"><option value="">— Choisir —</option>${options}</select>
+        </div>
+        <div class="field-item">
+          <label>École à conserver</label>
+          <select id="merge-to-select"><option value="">— Choisir —</option>${options}</select>
+        </div>
+      </div>
+      <button class="primary-btn" style="width:auto;padding:9px 16px" id="btn-merge-schools">Fusionner</button>
+      <p class="error-text" id="merge-error" style="display:none"></p>
+      <div id="merge-result"></div>
+    </div>
+  `;
+}
+
+async function mergeSchools() {
+  const errEl = document.getElementById("merge-error");
+  const resultEl = document.getElementById("merge-result");
+  errEl.style.display = "none";
+  resultEl.innerHTML = "";
+  const fromId = document.getElementById("merge-from-select").value;
+  const toId = document.getElementById("merge-to-select").value;
+  if (!fromId || !toId) {
+    errEl.textContent = "Choisissez les deux écoles.";
+    errEl.style.display = "block";
+    return;
+  }
+  if (fromId === toId) {
+    errEl.textContent = "Choisissez deux écoles différentes.";
+    errEl.style.display = "block";
+    return;
+  }
+  const fromSchool = directorySchools.find((s) => s.id === fromId);
+  const toSchool = directorySchools.find((s) => s.id === toId);
+  if (!confirm(`Fusionner "${fromSchool.schoolName}" dans "${toSchool.schoolName}" ? "${fromSchool.schoolName}" sera supprimée après transfert de ses données. Continuer ?`)) return;
+
+  const btn = document.getElementById("btn-merge-schools");
+  btn.disabled = true;
+  btn.textContent = "Fusion en cours…";
+  try {
+    const res = await fetch("/api/schools/merge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, fromId, toId }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error || "Erreur lors de la fusion.";
+      errEl.style.display = "block";
+      btn.disabled = false;
+      btn.textContent = "Fusionner";
+      return;
+    }
+    if (data.conflictWeeks.length) {
+      resultEl.innerHTML = `<p class="note-tag" style="color:#a3402e">
+        ${data.movedWeeks} semaine(s) fusionnée(s). ⚠️ ${data.conflictWeeks.length} semaine(s) existaient déjà des deux côtés et n'ont PAS été fusionnées automatiquement (pour ne pas mélanger des chiffres) : à vérifier et corriger à la main en Cuisine pour "${data.toSchoolName}". "${data.fromSchoolName}" reste donc présente, avec uniquement ces semaines en conflit.
+      </p>`;
+    } else {
+      resultEl.innerHTML = `<p class="note-tag" style="color:#2f6b3a">✅ Fusion complète : ${data.movedWeeks} semaine(s) transférée(s), "${data.fromSchoolName}" supprimée.</p>`;
+    }
+    btn.disabled = false;
+    btn.textContent = "Fusionner";
+    loadDirectory();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = "block";
+    btn.disabled = false;
+    btn.textContent = "Fusionner";
+  }
+}
+
 async function loadDirectory() {
   const el = document.getElementById("directory-content");
   el.innerHTML = `<p class="help-text">Chargement…</p>`;
   try {
     const res = await fetch(`/api/schools?code=${encodeURIComponent(kitchenCode)}`);
     const data = await res.json();
+    directorySchools = data.schools || [];
     if (!data.ok || !data.schools.length) {
-      el.innerHTML = `<p class="help-text">Aucune école enregistrée pour l'instant.</p>`;
+      el.innerHTML = renderMergePanel() + `<p class="help-text">Aucune école enregistrée pour l'instant.</p>`;
+      attachMergeHandlers();
       return;
     }
-    el.innerHTML = data.schools.map((s) => `
+    el.innerHTML = renderMergePanel() + data.schools.map((s) => `
       <div class="school-block">
         <div class="school-block-head" style="margin-bottom:6px">
           <span class="school-name">${s.schoolName}</span>
@@ -120,9 +210,21 @@ async function loadDirectory() {
     document.querySelectorAll("[data-delete]").forEach((btn) => {
       btn.addEventListener("click", () => deleteSchool(btn.dataset.delete, btn));
     });
+    attachMergeHandlers();
   } catch (e) {
     el.innerHTML = `<p class="error-text">${e.message}</p>`;
   }
+}
+
+function attachMergeHandlers() {
+  document.querySelectorAll('[data-action="toggle-merge-schools"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      showMergeSchools = !showMergeSchools;
+      loadDirectory();
+    });
+  });
+  const mergeBtn = document.getElementById("btn-merge-schools");
+  if (mergeBtn) mergeBtn.addEventListener("click", mergeSchools);
 }
 
 async function deleteSchool(schoolName, btn) {
