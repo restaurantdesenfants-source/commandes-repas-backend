@@ -692,13 +692,22 @@ app.post("/api/orders/correction", async (req, res) => {
 
     const week = row.week || emptyWeek();
     const dayValues = week[dayId] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+    const newMaternelle = Math.max(0, Number(dayValues.maternelle || 0) + Number(delta.maternelle || 0));
+    const newPrimaire = Math.max(0, Number(dayValues.primaire || 0) + Number(delta.primaire || 0));
+    const newPrimairePlus = Math.max(0, Number(dayValues.primairePlus || 0) + Number(delta.primairePlus || 0));
     const newValues = {
       soupe: Math.max(0, Number(dayValues.soupe || 0) + Number(delta.soupe || 0)),
-      maternelle: Math.max(0, Number(dayValues.maternelle || 0) + Number(delta.maternelle || 0)),
-      primaire: Math.max(0, Number(dayValues.primaire || 0) + Number(delta.primaire || 0)),
-      primairePlus: Math.max(0, Number(dayValues.primairePlus || 0) + Number(delta.primairePlus || 0)),
-      dessert: Math.max(0, Number(dayValues.dessert || 0) + Number(delta.dessert || 0)),
+      maternelle: newMaternelle,
+      primaire: newPrimaire,
+      primairePlus: newPrimairePlus,
+      // Le dessert suit toujours automatiquement le nombre de repas (1 par repas) :
+      // aucune saisie manuelle n'est nécessaire ni possible ici. Les suppléments
+      // dessert (au-delà d'1 par repas) se gèrent séparément en Facturation.
+      dessert: newMaternelle + newPrimaire + newPrimairePlus,
     };
+    // Le delta réellement journalisé pour le dessert reflète ce changement automatique,
+    // pour que l'historique (cuisine/facturation) montre la bonne valeur avant/après.
+    const appliedDelta = { ...delta, dessert: newValues.dessert - Number(dayValues.dessert || 0) };
     week[dayId] = newValues;
 
     await upsertOrder({
@@ -715,7 +724,7 @@ app.post("/api/orders/correction", async (req, res) => {
       school_name: row.school_name,
       week_key: weekKey,
       day_id: dayId,
-      delta,
+      delta: appliedDelta,
       new_values: { ...newValues, __source: "ecole" },
     });
 
@@ -754,7 +763,12 @@ async function applyAdminDayEdits(schoolName, weekKey, weekUpdates) {
   const mergedWeek = {};
   for (const j of JOURS) {
     const oldV = oldWeek[j.id] || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
-    const newV = weekUpdates[j.id] || oldV;
+    const providedV = weekUpdates[j.id] || oldV;
+    // Le dessert suit toujours automatiquement le nombre de repas (1 par repas),
+    // quelle que soit la valeur envoyée : aucune saisie manuelle n'est prise en
+    // compte ici. Les suppléments dessert se gèrent séparément en Facturation.
+    const repas = Number(providedV.maternelle || 0) + Number(providedV.primaire || 0) + Number(providedV.primairePlus || 0);
+    const newV = { ...providedV, dessert: repas };
     mergedWeek[j.id] = newV;
     const delta = {
       soupe: Number(newV.soupe || 0) - Number(oldV.soupe || 0),
