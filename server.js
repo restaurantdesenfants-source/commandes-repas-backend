@@ -12,6 +12,7 @@ const cors = require("cors");
 const path = require("path");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
+const PDFDocument = require("pdfkit");
 
 const app = express();
 app.use(cors());
@@ -153,8 +154,32 @@ function dateForDay(weekKey, dayId) {
   return d;
 }
 
+const MOIS_FR = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
+function monthLabelFr(month) {
+  const [year, mo] = month.split("-").map((n) => parseInt(n, 10));
+  return `${MOIS_FR[mo - 1]} ${year}`;
+}
+
 function monthKeyFor(date) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+// Liste tous les jours scolaires (lundi/mardi/jeudi/vendredi) d'un mois "AAAA-MM",
+// chacun avec sa date, son identifiant de jour et la semaine (weekKey) à laquelle
+// il appartient — utile pour tout ce qui doit parcourir un mois jour par jour.
+function schoolDaysInMonth(month) {
+  const [year, mo] = month.split("-").map((n) => parseInt(n, 10));
+  const firstDay = new Date(Date.UTC(year, mo - 1, 1));
+  const lastDay = new Date(Date.UTC(year, mo, 0));
+  const dayIdByDow = { 1: "lundi", 2: "mardi", 4: "jeudi", 5: "vendredi" };
+  const days = [];
+  for (let d = new Date(firstDay); d <= lastDay; d.setUTCDate(d.getUTCDate() + 1)) {
+    const dayId = dayIdByDow[d.getUTCDay()];
+    if (!dayId) continue;
+    const date = new Date(d);
+    days.push({ date, dayId, weekKey: getISOWeekKeyForDate(date) });
+  }
+  return days;
 }
 
 function emptyWeek() {
@@ -192,6 +217,33 @@ async function upsertSchool(nameLower, schoolName, codeHash, schoolEmail) {
   if (schoolEmail) fields.school_email = schoolEmail;
   const { error } = await supabase.from("schools").upsert(fields);
   if (error) throw error;
+}
+
+// Normalise un nom d'école pour la comparaison : enlève les accents, les espaces
+// en trop, et met en minuscule. "École Sainte-Anne" et "Ecole  Sainte-Anne"
+// donnent ainsi la même valeur.
+function normalizeSchoolName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+// Retrouve l'identifiant interne d'une école à partir du nom tapé, même si
+// l'orthographe exacte (accents, espaces) diffère légèrement de celle utilisée
+// lors de sa toute première commande. Si aucune école existante ne correspond
+// (même approximativement), renvoie l'identifiant exact tel quel — une nouvelle
+// école sera alors créée avec ce nom, comme avant.
+async function resolveSchoolId(schoolName) {
+  const exact = String(schoolName || "").trim().toLowerCase();
+  const exactMatch = await getSchool(exact);
+  if (exactMatch) return exact;
+  const normalized = normalizeSchoolName(schoolName);
+  const all = await getAllSchools();
+  const found = all.find((s) => normalizeSchoolName(s.school_name) === normalized);
+  return found ? found.id : exact;
 }
 
 async function getAllSchools() {
@@ -464,7 +516,7 @@ app.post("/api/access", async (req, res) => {
     if (!schoolName || !code) {
       return res.status(400).json({ ok: false, error: "Nom d'école et code requis." });
     }
-    const nameLower = schoolName.trim().toLowerCase();
+    const nameLower = await resolveSchoolId(schoolName);
     const hash = hashCode(code);
     const school = await getSchool(nameLower);
 
@@ -493,7 +545,7 @@ app.post("/api/orders", async (req, res) => {
     if (!schoolName || !schoolEmail || !code || !weekKey || !week) {
       return res.status(400).json({ ok: false, error: "Informations manquantes." });
     }
-    const nameLower = schoolName.trim().toLowerCase();
+    const nameLower = await resolveSchoolId(schoolName);
     const hash = hashCode(code);
     const school = await getSchool(nameLower);
 
@@ -545,7 +597,7 @@ app.post("/api/orders/mine", async (req, res) => {
     if (!schoolName || !code || !weekKey) {
       return res.status(400).json({ ok: false, error: "Informations manquantes." });
     }
-    const nameLower = schoolName.trim().toLowerCase();
+    const nameLower = await resolveSchoolId(schoolName);
     const hash = hashCode(code);
     const school = await getSchool(nameLower);
 
@@ -593,7 +645,7 @@ app.post("/api/orders/correction", async (req, res) => {
       return res.status(403).json({ ok: false, error: "La fenêtre de rectification (avant 9h15 le jour même) est fermée pour ce jour." });
     }
 
-    const nameLower = schoolName.trim().toLowerCase();
+    const nameLower = await resolveSchoolId(schoolName);
     const hash = hashCode(code);
     const school = await getSchool(nameLower);
     if (!school || school.code_hash !== hash) {
@@ -658,7 +710,7 @@ app.post("/api/orders/correction", async (req, res) => {
 // les jours absents ne sont pas modifiés (utile pour l'encodage mensuel, qui ne
 // touche que les jours sélectionnés).
 async function applyAdminDayEdits(schoolName, weekKey, weekUpdates) {
-  const nameLower = schoolName.trim().toLowerCase();
+  const nameLower = await resolveSchoolId(schoolName);
   const row = await getOrder(weekKey, nameLower);
   let schoolEmailFallback = null;
   if (!row) {
@@ -789,7 +841,7 @@ app.post("/api/schools/reset-code", async (req, res) => {
     if (!schoolName) {
       return res.status(400).json({ ok: false, error: "Nom d'école manquant." });
     }
-    const nameLower = schoolName.trim().toLowerCase();
+    const nameLower = await resolveSchoolId(schoolName);
     const school = await getSchool(nameLower);
     if (!school) {
       return res.status(404).json({ ok: false, error: "École introuvable." });
@@ -823,7 +875,7 @@ app.post("/api/schools/delete", async (req, res) => {
     if (!schoolName) {
       return res.status(400).json({ ok: false, error: "Nom d'école manquant." });
     }
-    const nameLower = schoolName.trim().toLowerCase();
+    const nameLower = await resolveSchoolId(schoolName);
     const school = await getSchool(nameLower);
     if (!school) {
       return res.status(404).json({ ok: false, error: "École introuvable." });
@@ -1071,6 +1123,242 @@ app.get("/api/billing", async (req, res) => {
     );
 
     res.json({ ok: true, schools, totals, corrections: correctionsThisMonth, dessertSupplementEntries });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Vérification des commandes d'un mois : pour chaque semaine du mois et chaque
+// école de l'annuaire, signale si la commande manque entièrement, ou si elle
+// n'existe que parce que la cuisine l'a encodée à la main (pas de vraie commande
+// envoyée par l'école ce jour-là). Permet de repérer rapidement une école qui a
+// oublié une semaine, au lieu de vérifier à la main semaine par semaine.
+app.get("/api/billing/order-check", async (req, res) => {
+  try {
+    const { month, code } = req.query;
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ ok: false, error: "Mois invalide." });
+    }
+    const [year, mo] = month.split("-").map((n) => parseInt(n, 10));
+    const firstDay = new Date(Date.UTC(year, mo - 1, 1));
+    const lastDay = new Date(Date.UTC(year, mo, 0));
+    const weekKeys = [];
+    const weekKeyToLabel = {};
+    for (let d = new Date(firstDay); d <= lastDay; d.setUTCDate(d.getUTCDate() + 1)) {
+      const dow = d.getUTCDay();
+      if (![1, 2, 4, 5].includes(dow)) continue; // seuls lundi/mardi/jeudi/vendredi comptent
+      const wk = getISOWeekKeyForDate(new Date(d));
+      if (!weekKeys.includes(wk)) {
+        weekKeys.push(wk);
+        const monday = mondayFromWeekKey(wk);
+        const fridayIsh = new Date(monday);
+        fridayIsh.setUTCDate(monday.getUTCDate() + 4);
+        const fmt = (dt) => `${String(dt.getUTCDate()).padStart(2, "0")}/${String(dt.getUTCMonth() + 1).padStart(2, "0")}`;
+        weekKeyToLabel[wk] = `Semaine du ${fmt(monday)} au ${fmt(fridayIsh)}`;
+      }
+    }
+
+    const schools = await getAllSchools();
+    const issues = [];
+    for (const wk of weekKeys) {
+      const rows = await getOrdersForWeek(wk);
+      const byName = {};
+      rows.forEach((r) => { byName[(r.school_name || "").toLowerCase()] = r; });
+      schools.forEach((s) => {
+        const nameLower = s.id || (s.school_name || "").toLowerCase();
+        const row = byName[nameLower];
+        if (!row) {
+          issues.push({ schoolName: s.school_name, weekKey: wk, weekLabel: weekKeyToLabel[wk], status: "missing" });
+        } else if (!row.submitted_at) {
+          issues.push({ schoolName: s.school_name, weekKey: wk, weekLabel: weekKeyToLabel[wk], status: "manual" });
+        }
+      });
+    }
+
+    res.json({ ok: true, month, weeks: weekKeys.map((wk) => ({ weekKey: wk, label: weekKeyToLabel[wk] })), issues });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// ---------- Récapitulatif mensuel PDF (par école) ----------
+
+// Reconstitue, pour un jour donné, les quantités telles que commandées à
+// l'origine (avant toute rectification) en soustrayant du total actuel la somme
+// des écarts déjà appliqués ce jour-là. Fonctionne pour n'importe quel champ
+// (soupe, maternelle, primaire, primairePlus, dessert) puisque chaque
+// rectification journalise toujours son écart exact, quelle que soit sa source
+// (école ou cuisine).
+function computeOriginalValues(finalValues, correctionsForDay) {
+  const original = { ...finalValues };
+  correctionsForDay.forEach((c) => {
+    ["soupe", "maternelle", "primaire", "primairePlus", "dessert"].forEach((field) => {
+      original[field] = Number(original[field] || 0) - Number((c.delta && c.delta[field]) || 0);
+    });
+  });
+  return original;
+}
+
+const PDF_COLS = [
+  { key: "label", title: "Jour", width: 95 },
+  { key: "maternelleCmd", title: "Matern.\ncommandé", width: 58 },
+  { key: "maternelleRect", title: "Matern.\nrectifié", width: 58 },
+  { key: "primaireCmd", title: "Primaire\ncommandé", width: 58 },
+  { key: "primaireRect", title: "Primaire\nrectifié", width: 58 },
+  { key: "primairePlusCmd", title: "Primaire +\ncommandé", width: 58 },
+  { key: "primairePlusRect", title: "Primaire +\nrectifié", width: 58 },
+  { key: "soupeCmd", title: "Soupe (L)\ncommandée", width: 58 },
+  { key: "soupeRect", title: "Soupe (L)\nrectifiée", width: 58 },
+  { key: "dessertCmd", title: "Dessert\ncommandé", width: 58 },
+  { key: "dessertRect", title: "Dessert\nrectifié", width: 58 },
+];
+
+function drawPdfRow(doc, x0, y, rowHeight, cells, opts = {}) {
+  let x = x0;
+  PDF_COLS.forEach((col) => {
+    if (opts.bg) {
+      doc.rect(x, y, col.width, rowHeight).fill(opts.bg);
+      doc.fillColor("#24302a");
+    }
+    doc.rect(x, y, col.width, rowHeight).stroke("#ddd6c4");
+    doc
+      .font(opts.bold ? "Helvetica-Bold" : "Helvetica")
+      .fontSize(opts.fontSize || 8.5)
+      .fillColor("#24302a")
+      .text(String(cells[col.key] ?? ""), x + 3, y + rowHeight / 2 - (opts.fontSize || 8.5) / 2, {
+        width: col.width - 6,
+        align: col.key === "label" ? "left" : "center",
+      });
+    x += col.width;
+  });
+}
+
+app.get("/api/billing/school-pdf", async (req, res) => {
+  try {
+    const { month, schoolName, code } = req.query;
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!month || !/^\d{4}-\d{2}$/.test(month) || !schoolName) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+
+    const nameLower = await resolveSchoolId(schoolName);
+    const school = await getSchool(nameLower);
+    const displayName = school ? school.school_name : schoolName;
+
+    const days = schoolDaysInMonth(month);
+    const weekKeys = [...new Set(days.map((d) => d.weekKey))];
+
+    const ordersByWeek = {};
+    const correctionsByWeek = {};
+    for (const wk of weekKeys) {
+      ordersByWeek[wk] = await getOrder(wk, nameLower);
+      const allCorrectionsThisWeek = await getCorrectionsForWeek(wk);
+      correctionsByWeek[wk] = allCorrectionsThisWeek.filter(
+        (c) => normalizeSchoolName(c.school_name) === normalizeSchoolName(displayName)
+      );
+    }
+
+    const rows = [];
+    const totalsCmd = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
+    const totalsRect = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
+
+    days.forEach((d) => {
+      const order = ordersByWeek[d.weekKey];
+      const finalValues = (order && order.week && order.week[d.dayId]) || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+      const correctionsForDay = (correctionsByWeek[d.weekKey] || []).filter((c) => c.day_id === d.dayId);
+      const originalValues = computeOriginalValues(finalValues, correctionsForDay);
+
+      const dayLabel = JOURS.find((j) => j.id === d.dayId)?.label || d.dayId;
+      const dateStr = `${String(d.date.getUTCDate()).padStart(2, "0")}/${String(d.date.getUTCMonth() + 1).padStart(2, "0")}`;
+
+      ["maternelle", "primaire", "primairePlus", "soupe", "dessert"].forEach((f) => {
+        totalsCmd[f] += Number(originalValues[f] || 0);
+        totalsRect[f] += Number(finalValues[f] || 0);
+      });
+
+      rows.push({
+        label: `${dayLabel} ${dateStr}`,
+        maternelleCmd: originalValues.maternelle || 0,
+        maternelleRect: finalValues.maternelle || 0,
+        primaireCmd: originalValues.primaire || 0,
+        primaireRect: finalValues.primaire || 0,
+        primairePlusCmd: originalValues.primairePlus || 0,
+        primairePlusRect: finalValues.primairePlus || 0,
+        soupeCmd: Math.round((originalValues.soupe || 0) * 100) / 100,
+        soupeRect: Math.round((finalValues.soupe || 0) * 100) / 100,
+        dessertCmd: originalValues.dessert || 0,
+        dessertRect: finalValues.dessert || 0,
+      });
+    });
+
+    const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 30 });
+    const fileSafeMonth = month;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="recapitulatif-${displayName.replace(/[^a-z0-9]+/gi, "_")}-${fileSafeMonth}.pdf"`);
+    doc.pipe(res);
+
+    doc.font("Helvetica-Bold").fontSize(16).fillColor("#24302a").text(`Récapitulatif mensuel — ${displayName}`);
+    doc.font("Helvetica").fontSize(11).fillColor("#6b6054").text(`${monthLabelFr(month)} — généré le ${new Date().toLocaleDateString("fr-FR")}`);
+    doc.moveDown(0.8);
+
+    const x0 = doc.page.margins.left;
+    let y = doc.y;
+    const headerHeight = 28;
+    const rowHeight = 18;
+
+    drawPdfRow(doc, x0, y, headerHeight, Object.fromEntries(PDF_COLS.map((c) => [c.key, c.title])), { bold: true, bg: "#f1ece0", fontSize: 7.5 });
+    y += headerHeight;
+
+    rows.forEach((r) => {
+      if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 40) {
+        doc.addPage();
+        y = doc.page.margins.top;
+        drawPdfRow(doc, x0, y, headerHeight, Object.fromEntries(PDF_COLS.map((c) => [c.key, c.title])), { bold: true, bg: "#f1ece0", fontSize: 7.5 });
+        y += headerHeight;
+      }
+      drawPdfRow(doc, x0, y, rowHeight, r);
+      y += rowHeight;
+    });
+
+    const totalRow = {
+      label: "TOTAL",
+      maternelleCmd: totalsCmd.maternelle,
+      maternelleRect: totalsRect.maternelle,
+      primaireCmd: totalsCmd.primaire,
+      primaireRect: totalsRect.primaire,
+      primairePlusCmd: totalsCmd.primairePlus,
+      primairePlusRect: totalsRect.primairePlus,
+      soupeCmd: Math.round(totalsCmd.soupe * 100) / 100,
+      soupeRect: Math.round(totalsRect.soupe * 100) / 100,
+      dessertCmd: totalsCmd.dessert,
+      dessertRect: totalsRect.dessert,
+    };
+    if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 40) {
+      doc.addPage();
+      y = doc.page.margins.top;
+    }
+    drawPdfRow(doc, x0, y, rowHeight, totalRow, { bold: true, bg: "#f1ece0" });
+    y += rowHeight + 16;
+
+    doc
+      .font("Helvetica")
+      .fontSize(8.5)
+      .fillColor("#6b6054")
+      .text(
+        "« commandé » = quantité initialement envoyée par l'école. « rectifié » = quantité finale après d'éventuelles corrections (école ou cuisine). La soupe incluse (0,2L/repas) et le dessert automatique (1/repas) ne sont pas comptés séparément ici : la colonne Soupe correspond à la soupe commandée en plus, et Dessert au nombre total de desserts.",
+        x0,
+        y,
+        { width: doc.page.width - x0 - doc.page.margins.right }
+      );
+
+    doc.end();
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
