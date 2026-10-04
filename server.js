@@ -125,6 +125,19 @@ function isDayCorrectionOpen(weekKey, dayId) {
   return now <= cutoff;
 }
 
+// Lundi de la PROCHAINE semaine d'école à partir d'aujourd'hui (heure de
+// Bruxelles) — utilisé pour le rappel de commande, pensé pour être déclenché
+// le jeudi avant 15h (jamais le lundi de la semaine en cours).
+function nextMondayWeekKey() {
+  const full = brusselsNowFull();
+  const today = new Date(Date.UTC(full.year, full.month - 1, full.day));
+  const dow = today.getUTCDay(); // 0=dimanche .. 6=samedi
+  const daysUntilMonday = ((1 - dow + 7) % 7) || 7; // toujours le lundi SUIVANT, jamais aujourd'hui
+  const monday = new Date(today);
+  monday.setUTCDate(today.getUTCDate() + daysUntilMonday);
+  return getISOWeekKeyForDate(monday);
+}
+
 function getISOWeekKeyForDate(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
@@ -611,6 +624,78 @@ async function sendAdminEditKitchenEmail({ schoolName, allChangedDays }) {
   }
   return res.json();
 }
+
+async function sendReminderEmail({ schoolEmail, schoolName, weekLabel }) {
+  const html = `
+    <p>Bonjour,</p>
+    <p>Petit rappel : nous n'avons pas encore reçu votre commande pour la semaine du <strong>${weekLabel}</strong>.</p>
+    <p>La date limite est fixée à <strong>aujourd'hui, jeudi à 15h</strong> — il vous reste donc environ 2 heures pour la passer.</p>
+    <p>Merci de vous connecter dès que possible pour l'encoder.</p>
+  `;
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "api-key": process.env.BREVO_API_KEY,
+    },
+    body: JSON.stringify({
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
+      to: [{ email: schoolEmail, name: schoolName }],
+      ...(process.env.KITCHEN_EMAIL ? { cc: [{ email: process.env.KITCHEN_EMAIL }] } : {}),
+      subject: `Rappel - commande non reçue - semaine du ${weekLabel}`,
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Brevo a refusé l'envoi : ${errText}`);
+  }
+  return res.json();
+}
+
+// Rappel automatique 2h avant la clôture (jeudi 15h) aux écoles qui n'ont pas
+// encore commandé pour la semaine suivante. Pensé pour être déclenché par un
+// service externe gratuit (ex. cron-job.org) qui "sonne" cette URL chaque jeudi
+// à 13h, heure de Bruxelles — voir la documentation fournie pour la configurer.
+// Protégé par un secret dédié (CRON_SECRET), différent du code cuisine, car
+// cette adresse doit pouvoir être appelée publiquement par ce service externe.
+app.get("/api/cron/send-reminders", async (req, res) => {
+  try {
+    const secret = req.query.secret;
+    if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
+      return res.status(401).json({ ok: false, error: "Accès refusé." });
+    }
+
+    const weekKey = nextMondayWeekKey();
+    const monday = mondayFromWeekKey(weekKey);
+    const friday = new Date(monday);
+    friday.setUTCDate(monday.getUTCDate() + 4);
+    const fmt = (d) => `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    const weekLabel = `${fmt(monday)} au ${fmt(friday)}`;
+
+    const schools = await getAllSchools();
+    const existingOrders = await getOrdersForWeek(weekKey);
+    const orderedIds = new Set(existingOrders.map((o) => o.school_name_lower));
+    const toRemind = schools.filter((s) => !orderedIds.has(s.id) && s.school_email);
+
+    let remindersSent = 0;
+    const errors = [];
+    for (const s of toRemind) {
+      try {
+        await sendReminderEmail({ schoolEmail: s.school_email, schoolName: s.school_name, weekLabel });
+        remindersSent++;
+      } catch (e) {
+        errors.push({ schoolName: s.school_name, error: e.message });
+      }
+    }
+
+    res.json({ ok: true, weekKey, weekLabel, remindersSent, totalMissing: toRemind.length, errors });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
 
 // ---------- API ----------
 
