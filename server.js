@@ -265,6 +265,14 @@ async function setSchoolNewCode(nameLower, newCode) {
 // Supprime définitivement une école : ses commandes, ses rectifications, et son
 // accès. Irréversible — pensé pour nettoyer des écoles de test, pas pour un usage
 // courant sur de vraies écoles.
+// Supprime uniquement la fiche "annuaire" d'une école (accès/code), sans toucher
+// à ses commandes ni rectifications. Utilisé après une fusion de doublon, une
+// fois que ses commandes ont déjà été transférées vers l'autre fiche.
+async function deleteSchoolRecordOnly(nameLower) {
+  const { error } = await supabase.from("schools").delete().eq("id", nameLower);
+  if (error) throw error;
+}
+
 async function deleteSchool(nameLower, schoolName) {
   const { error: e1 } = await supabase.from("orders").delete().eq("school_name_lower", nameLower);
   if (e1) throw e1;
@@ -329,6 +337,31 @@ async function getAllOrders() {
   const { data, error } = await supabase.from("orders").select("*");
   if (error) throw error;
   return data;
+}
+
+async function getOrdersForSchool(nameLower) {
+  const { data, error } = await supabase.from("orders").select("*").eq("school_name_lower", nameLower);
+  if (error) throw error;
+  return data;
+}
+
+async function reassignOrderSchool(weekKey, fromNameLower, toNameLower, toSchoolName) {
+  const { error } = await supabase
+    .from("orders")
+    .update({ school_name_lower: toNameLower, school_name: toSchoolName })
+    .eq("week_key", weekKey)
+    .eq("school_name_lower", fromNameLower);
+  if (error) throw error;
+}
+
+async function reassignCorrectionsSchoolName(fromName, toName) {
+  const { error } = await supabase.from("corrections").update({ school_name: toName }).eq("school_name", fromName);
+  if (error) throw error;
+}
+
+async function reassignDessertSupplementsSchoolName(fromName, toName) {
+  const { error } = await supabase.from("dessert_supplements").update({ school_name: toName }).eq("school_name", fromName);
+  if (error) throw error;
 }
 
 async function logCorrection(entry) {
@@ -821,7 +854,7 @@ app.get("/api/schools", async (req, res) => {
     const schools = await getAllSchools();
     res.json({
       ok: true,
-      schools: schools.map((s) => ({ schoolName: s.school_name, schoolEmail: s.school_email || null })),
+      schools: schools.map((s) => ({ id: s.id, schoolName: s.school_name, schoolEmail: s.school_email || null })),
     });
   } catch (e) {
     console.error(e);
@@ -1186,6 +1219,67 @@ app.get("/api/billing/order-check", async (req, res) => {
   }
 });
 
+// Fusionne deux fiches école qui désignent en réalité la même école (doublon dû
+// à une orthographe différente créé avant la correction automatique des accents).
+// Toutes les commandes, rectifications et suppléments dessert de "fromId" sont
+// transférés vers "toId". Par sécurité, une semaine où les DEUX écoles ont déjà
+// une commande n'est jamais fusionnée automatiquement (pour ne jamais mélanger
+// silencieusement des chiffres de facturation) : elle est signalée pour une
+// résolution manuelle, et la fiche "fromId" n'est supprimée que si tout a pu
+// être transféré sans conflit.
+app.post("/api/schools/merge", async (req, res) => {
+  try {
+    const { code, fromId, toId } = req.body || {};
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    }
+    if (!fromId || !toId || fromId === toId) {
+      return res.status(400).json({ ok: false, error: "Sélection invalide." });
+    }
+    const fromSchool = await getSchool(fromId);
+    const toSchool = await getSchool(toId);
+    if (!fromSchool || !toSchool) {
+      return res.status(404).json({ ok: false, error: "École introuvable." });
+    }
+
+    const fromOrders = await getOrdersForSchool(fromId);
+    const toOrders = await getOrdersForSchool(toId);
+    const toWeekKeys = new Set(toOrders.map((o) => o.week_key));
+
+    const movedWeeks = [];
+    const conflictWeeks = [];
+    for (const row of fromOrders) {
+      if (toWeekKeys.has(row.week_key)) {
+        conflictWeeks.push(row.week_key);
+      } else {
+        await reassignOrderSchool(row.week_key, fromId, toId, toSchool.school_name);
+        movedWeeks.push(row.week_key);
+      }
+    }
+
+    await reassignCorrectionsSchoolName(fromSchool.school_name, toSchool.school_name);
+    await reassignDessertSupplementsSchoolName(fromSchool.school_name, toSchool.school_name);
+
+    let deletedOldSchool = false;
+    if (!conflictWeeks.length) {
+      await deleteSchoolRecordOnly(fromId);
+      deletedOldSchool = true;
+    }
+
+    res.json({
+      ok: true,
+      movedWeeks: movedWeeks.length,
+      conflictWeeks,
+      deletedOldSchool,
+      fromSchoolName: fromSchool.school_name,
+      toSchoolName: toSchool.school_name,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
 // ---------- Récapitulatif mensuel PDF (par école) ----------
 
 // Reconstitue, pour un jour donné, les quantités telles que commandées à
@@ -1248,9 +1342,12 @@ app.get("/api/billing/school-pdf", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Informations manquantes." });
     }
 
-    const nameLower = await resolveSchoolId(schoolName);
-    const school = await getSchool(nameLower);
-    const displayName = school ? school.school_name : schoolName;
+    // Important : ici on veut l'école EXACTEMENT telle qu'affichée dans la liste de
+    // facturation (celle sur laquelle la cuisine a cliqué), pas une école "proche".
+    // On n'utilise donc jamais la résolution tolérante aux accents (resolveSchoolId) :
+    // elle servirait à confondre deux écoles au nom très ressemblant, ce qui est
+    // justement le contraire de ce qu'il faut pour distinguer deux fiches en doublon.
+    const displayName = String(schoolName).trim();
 
     const days = schoolDaysInMonth(month);
     const weekKeys = [...new Set(days.map((d) => d.weekKey))];
@@ -1258,10 +1355,11 @@ app.get("/api/billing/school-pdf", async (req, res) => {
     const ordersByWeek = {};
     const correctionsByWeek = {};
     for (const wk of weekKeys) {
-      ordersByWeek[wk] = await getOrder(wk, nameLower);
+      const rowsThisWeek = await getOrdersForWeek(wk);
+      ordersByWeek[wk] = rowsThisWeek.find((r) => String(r.school_name || "").trim() === displayName) || null;
       const allCorrectionsThisWeek = await getCorrectionsForWeek(wk);
       correctionsByWeek[wk] = allCorrectionsThisWeek.filter(
-        (c) => normalizeSchoolName(c.school_name) === normalizeSchoolName(displayName)
+        (c) => String(c.school_name || "").trim() === displayName
       );
     }
 
