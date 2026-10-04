@@ -351,7 +351,7 @@ function render() {
                     <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="maternelle" value="${d.maternelle || 0}" style="${inputStyle}" /></td>
                     <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primaire" value="${d.primaire || 0}" style="${inputStyle}" /></td>
                     <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="primairePlus" value="${d.primairePlus || 0}" style="${inputStyle}" /></td>
-                    <td><input type="text" inputmode="decimal" class="edit-input" data-day="${j.id}" data-field="dessert" value="${d.dessert}" style="${inputStyle}" /></td>
+                    <td style="opacity:.65">${d.dessert} <span style="font-size:11px">(auto)</span></td>
                   </tr>`;
                 }
                 return `<tr><td class="school-col">${dayHeaderForSchool(j, o.schoolName)}</td><td>${round2(d.soupeCommandee)}</td><td>${round2(d.soupeIncluse)}</td><td>${round2(d.soupeTotale)}</td><td>${d.maternelle || 0}</td><td>${d.primaire || 0}</td><td>${d.primairePlus || 0}</td><td>${d.dessert}</td></tr>`;
@@ -665,7 +665,7 @@ let monthEncodeSchool = "";
 let monthEncodeSchoolIsNew = false;
 let monthEncodeNewEmail = "";
 let monthEncodeMonth = "";
-let monthEncodeDefaults = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+let monthEncodeDefaults = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0 };
 let monthEncodeDays = null;
 
 async function loadSchoolsDirectory() {
@@ -719,7 +719,7 @@ function renderAddMissingSection() {
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+          <thead><tr><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th></tr></thead>
           <tbody>
             ${JOURS.map((j) => `<tr>
               <td class="school-col">${dayHeader(j)}</td>
@@ -727,12 +727,12 @@ function renderAddMissingSection() {
               <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="maternelle" value="0" style="${adminInputStyle()}" /></td>
               <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="primaire" value="0" style="${adminInputStyle()}" /></td>
               <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="primairePlus" value="0" style="${adminInputStyle()}" /></td>
-              <td><input type="text" inputmode="decimal" class="missing-input" data-day="${j.id}" data-field="dessert" value="0" style="${adminInputStyle()}" /></td>
             </tr>`).join("")}
           </tbody>
         </table>
       </div>
-      <p class="help-text-small">Le dessert n'est pas calculé automatiquement ici : indiquez le nombre voulu (généralement 1 par repas).</p>
+      <p class="help-text-small">Le dessert et la soupe incluse se calculent automatiquement (1 dessert par repas, 0,2L de soupe par repas).</p>
+
       <button class="primary-btn" style="width:auto;padding:9px 16px;margin-top:10px" id="btn-create-missing">Créer la commande</button>
       <p class="error-text" id="missing-error" style="display:none"></p>
     </div>
@@ -795,12 +795,12 @@ function renderMonthEncodeSection() {
     daysHtml = `
       <div class="table-scroll" style="margin-top:14px">
         <table>
-          <thead><tr><th></th><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert</th></tr></thead>
+          <thead><tr><th></th><th class="school-col">Jour</th><th>Soupe (L)</th><th>Matern.</th><th>Primaire</th><th>Primaire +</th><th>Dessert (auto)</th></tr></thead>
           <tbody>
             ${monthEncodeDays.map((d, i) => `<tr style="${d.holiday ? "opacity:.5" : ""}">
               <td><input type="checkbox" class="month-day-checkbox" data-idx="${i}" ${d.include ? "checked" : ""} ${d.holiday ? "disabled" : ""} style="width:17px;height:17px;accent-color:#c9a227" /></td>
               <td class="school-col">${d.label}${d.holiday ? ` <span style="color:#a3402e;font-size:12px">(vacances — ${d.holiday})</span>` : ""}</td>
-              <td>${round2(d.soupe)}</td><td>${d.maternelle}</td><td>${d.primaire}</td><td>${d.primairePlus}</td><td>${d.dessert}</td>
+              <td>${round2(d.soupe)}</td><td>${d.maternelle}</td><td>${d.primaire}</td><td>${d.primairePlus}</td><td style="opacity:.65">${Number(d.maternelle) + Number(d.primaire) + Number(d.primairePlus)}</td>
             </tr>`).join("")}
           </tbody>
         </table>
@@ -844,8 +844,8 @@ function renderMonthEncodeSection() {
         <div class="field-item"><label>Maternelle</label><input type="text" inputmode="decimal" id="month-default-maternelle" value="${monthEncodeDefaults.maternelle}" /></div>
         <div class="field-item"><label>Primaire</label><input type="text" inputmode="decimal" id="month-default-primaire" value="${monthEncodeDefaults.primaire}" /></div>
         <div class="field-item"><label>Primaire +</label><input type="text" inputmode="decimal" id="month-default-primairePlus" value="${monthEncodeDefaults.primairePlus}" /></div>
-        <div class="field-item"><label>Dessert</label><input type="text" inputmode="decimal" id="month-default-dessert" value="${monthEncodeDefaults.dessert}" /></div>
       </div>
+      <p class="help-text-small">Le dessert et la soupe incluse se calculent automatiquement (1 dessert par repas, 0,2L de soupe par repas).</p>
       <button class="link-btn" id="btn-generate-month-encode">Proposer l'encodage</button>
       ${daysHtml}
       <p class="error-text" id="month-encode-error" style="display:none"></p>
@@ -885,7 +885,6 @@ function generateMonthEncodeDays() {
     maternelle: parseDecimalAdmin(document.getElementById("month-default-maternelle").value),
     primaire: parseDecimalAdmin(document.getElementById("month-default-primaire").value),
     primairePlus: parseDecimalAdmin(document.getElementById("month-default-primairePlus").value),
-    dessert: parseDecimalAdmin(document.getElementById("month-default-dessert").value),
   };
 
   const [year, month] = monthVal.split("-").map((n) => parseInt(n, 10));
@@ -910,7 +909,6 @@ function generateMonthEncodeDays() {
       maternelle: monthEncodeDefaults.maternelle,
       primaire: monthEncodeDefaults.primaire,
       primairePlus: monthEncodeDefaults.primairePlus,
-      dessert: monthEncodeDefaults.dessert,
     });
   }
   monthEncodeDays = days;
@@ -943,7 +941,6 @@ async function submitMonthEncode() {
           maternelle: d.maternelle,
           primaire: d.primaire,
           primairePlus: d.primairePlus,
-          dessert: d.dessert,
         })),
       }),
     });
