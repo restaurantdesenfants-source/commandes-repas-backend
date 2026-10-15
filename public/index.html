@@ -54,6 +54,20 @@
 
     <div id="days-container"></div>
 
+    <label class="checkbox-row" style="margin-top:14px">
+      <input type="checkbox" id="multi-toggle" />
+      Appliquer cette commande à un mois complet (plusieurs semaines d'un coup)
+    </label>
+    <div id="multi-box" class="day-card" style="display:none;margin-top:8px">
+      <p class="day-card-title">Mois à commander</p>
+      <select id="multi-month" style="width:100%;padding:10px;margin-bottom:10px"></select>
+      <p class="help-text-small" style="margin-top:0">
+        La commande saisie ci-dessus sera appliquée à chaque semaine cochée. Les semaines de vacances scolaires n'apparaissent pas.
+        Décochez une semaine pour la retirer.
+      </p>
+      <div id="multi-weeks"></div>
+    </div>
+
     <p class="total-row"><span>Total repas / semaine</span><span class="total-value" id="total-repas">0</span></p>
     <p class="total-row" style="margin-top:-14px;font-size:12.5px"><span>— dont maternelle</span><span class="total-value" id="total-maternelle" style="font-size:14px">0</span></p>
     <p class="total-row" style="margin-top:-10px;font-size:12.5px"><span>— dont primaire</span><span class="total-value" id="total-primaire" style="font-size:14px">0</span></p>
@@ -385,11 +399,148 @@ function hideConfirm() {
   document.getElementById("confirm-box").style.display = "none";
 }
 
+
+// ---- Commande sur un mois complet ----
+let multiOn = false;
+
+function orderableMondays() {
+  // Lundis des semaines encore commandables, à partir de la semaine proposée, sur ~4 mois.
+  const list = [];
+  for (let i = 0; i < 18; i++) {
+    const m = new Date(target.monday);
+    m.setDate(m.getDate() + 7 * i);
+    if (isWeekAllHoliday(m)) continue;
+    list.push(m);
+  }
+  return list;
+}
+
+function monthKeyOfDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// Mois dans lesquels la semaine compte au moins un jour de service (hors vacances).
+function monthsOfWeek(monday) {
+  const set = new Set();
+  JOURS.forEach((j) => {
+    const d = dateForDayOfWeek(monday, j.id);
+    if (!holidayFor(d)) set.add(monthKeyOfDate(d));
+  });
+  return [...set];
+}
+
+function monthLabelFromKey(key) {
+  const [y, m] = key.split("-").map(Number);
+  const label = new Date(y, m - 1, 1).toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function setupMultiMonths() {
+  const sel = document.getElementById("multi-month");
+  const months = [];
+  orderableMondays().forEach((m) => monthsOfWeek(m).forEach((k) => { if (!months.includes(k)) months.push(k); }));
+  months.sort();
+  sel.innerHTML = months.slice(0, 4).map((k) => `<option value="${k}">${monthLabelFromKey(k)}</option>`).join("");
+  sel.onchange = renderMultiWeeks;
+  renderMultiWeeks();
+}
+
+async function renderMultiWeeks() {
+  const monthKey = document.getElementById("multi-month").value;
+  const box = document.getElementById("multi-weeks");
+  box.innerHTML = `<p class="help-text-small">Chargement…</p>`;
+  const mondays = orderableMondays().filter((m) => monthsOfWeek(m).includes(monthKey));
+  const existing = await Promise.all(
+    mondays.map(async (m) => {
+      try {
+        const res = await fetch("/api/orders/mine", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ schoolName, code: accessCode, weekKey: weekKeyFor(m) }),
+        });
+        const data = await res.json();
+        return !!(data.ok && data.order);
+      } catch (e) {
+        return false;
+      }
+    })
+  );
+  box.innerHTML = "";
+  mondays.forEach((m, i) => {
+    const row = document.createElement("label");
+    row.className = "checkbox-row";
+    row.style.margin = "6px 0";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.monday = m.toISOString();
+    cb.checked = !existing[i];
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(
+      ` Semaine du ${weekLabelFor(m)}` + (existing[i] ? " — déjà commandée (cochez pour la remplacer)" : "")
+    ));
+    box.appendChild(row);
+  });
+  if (!mondays.length) box.innerHTML = `<p class="help-text-small">Aucune semaine disponible pour ce mois.</p>`;
+}
+
+document.getElementById("multi-toggle").addEventListener("change", (e) => {
+  multiOn = e.target.checked;
+  document.getElementById("multi-box").style.display = multiOn ? "block" : "none";
+  document.getElementById("btn-submit").textContent = multiOn ? "Envoyer la commande du mois" : "Envoyer la commande";
+  hideConfirm();
+  if (multiOn) setupMultiMonths();
+});
+
+async function submitMulti(btn, comment) {
+  const picked = [...document.querySelectorAll("#multi-weeks input[type=checkbox]:checked")].map((cb) => new Date(cb.dataset.monday));
+  const box = document.getElementById("confirm-box");
+  if (!picked.length) {
+    box.style.display = "block";
+    box.innerHTML = `<p class="error-text">Cochez au moins une semaine.</p>`;
+    btn.disabled = false;
+    btn.textContent = "Envoyer la commande du mois";
+    return;
+  }
+  const orders = picked.map((m) => {
+    const w = JSON.parse(JSON.stringify(week));
+    JOURS.forEach((j) => { if (holidayFor(dateForDayOfWeek(m, j.id))) w[j.id] = emptyDay(); });
+    return { weekKey: weekKeyFor(m), weekLabel: weekLabelFor(m), week: w };
+  });
+  try {
+    const res = await fetch("/api/orders/multi", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schoolName, schoolEmail, code: accessCode, orders, comment }),
+    });
+    const data = await res.json();
+    box.style.display = "block";
+    if (!data.ok) {
+      box.innerHTML = `<p class="confirm-title">Erreur</p><p class="error-text">${data.error || "Une erreur est survenue."}</p>`;
+      btn.disabled = false;
+      btn.textContent = "Envoyer la commande du mois";
+      return;
+    }
+    const refus = (data.refused || []).length
+      ? `<p class="error-text">${data.refused.length} semaine(s) refusée(s) : échéance dépassée.</p>`
+      : "";
+    box.innerHTML = data.emailSent
+      ? `<p class="confirm-title">✓ ${data.savedCount} semaine(s) enregistrée(s), email de confirmation transmis à ${schoolEmail}</p>${refus}`
+      : `<p class="confirm-title">${data.savedCount} semaine(s) enregistrée(s)</p><p class="error-text">L'envoi de l'email a échoué : ${data.emailError || "cause inconnue"}</p>${refus}`;
+    btn.textContent = "Commande envoyée";
+  } catch (e) {
+    box.style.display = "block";
+    box.innerHTML = `<p class="confirm-title">Erreur réseau</p><p class="error-text">${e.message}</p>`;
+    btn.textContent = "Envoyer la commande du mois";
+    btn.disabled = false;
+  }
+}
+
 document.getElementById("btn-submit").addEventListener("click", async () => {
   const btn = document.getElementById("btn-submit");
   btn.disabled = true;
   btn.textContent = "Envoi…";
   const comment = document.getElementById("input-comment").value.trim();
+  if (multiOn) return submitMulti(btn, comment);
 
   try {
     const res = await fetch("/api/orders", {

@@ -46,8 +46,33 @@ function getISOWeek(date) {
   return { year: d.getUTCFullYear(), week: weekNo };
 }
 
+// Vrai si les 4 jours de service (lundi, mardi, jeudi, vendredi) de la semaine
+// commençant ce lundi tombent tous en vacances scolaires.
+function isWeekAllHoliday(monday) {
+  return ["lundi", "mardi", "jeudi", "vendredi"].every((id) => holidayFor(dateForDayOfWeek(monday, id)));
+}
+
 // La commande se fait le jeudi avant 15h, pour la semaine d'école suivante.
+// Si cette semaine est entièrement en vacances, on propose directement la
+// première semaine d'école qui suit, avec sa propre échéance (le jeudi 15h qui
+// précède cette semaine-là).
 function getTargetMonday(now = new Date()) {
+  const base = getTargetMondayRaw(now);
+  let monday = base.monday;
+  let skipped = false;
+  for (let i = 0; i < 10 && isWeekAllHoliday(monday); i++) {
+    monday = new Date(monday);
+    monday.setDate(monday.getDate() + 7);
+    skipped = true;
+  }
+  if (!skipped) return base;
+  const deadline = new Date(monday);
+  deadline.setDate(monday.getDate() - 4);
+  deadline.setHours(15, 0, 0, 0);
+  return { monday, deadline, deadlinePassed: now > deadline };
+}
+
+function getTargetMondayRaw(now = new Date()) {
   const day = now.getDay();
   const thisThursday = new Date(now);
   thisThursday.setDate(now.getDate() + (4 - day));
