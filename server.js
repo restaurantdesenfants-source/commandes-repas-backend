@@ -472,6 +472,43 @@ async function sendConfirmationEmail({ schoolEmail, schoolName, weekLabel, week,
   return res.json();
 }
 
+// Un seul email récapitulatif pour plusieurs semaines commandées d'un coup.
+async function sendMultiConfirmationEmail({ schoolEmail, schoolName, orders, comment }) {
+  const th = "padding:6px 10px;border:1px solid #ddd";
+  const blocs = orders
+    .map((o) => {
+      const lignes = JOURS.map((j) => {
+        const d = o.week[j.id] || {};
+        return `<tr><td style="${th}">${j.label}</td><td style="${th}">${d.soupe || 0} L</td><td style="${th}">${d.maternelle || 0}</td><td style="${th}">${d.primaire || 0}</td><td style="${th}">${d.primairePlus || 0}</td></tr>`;
+      }).join("");
+      return `<p style="margin-top:18px"><strong>Semaine du ${o.weekLabel}</strong></p>
+      <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
+        <tr style="background:#f2efe5"><th style="${th}">Jour</th><th style="${th}">Soupe</th><th style="${th}">Maternelle</th><th style="${th}">Primaire</th><th style="${th}">Primaire +</th></tr>
+        ${lignes}
+      </table>`;
+    })
+    .join("");
+  const html = `<p>Bonjour,</p>
+    <p>Voici la confirmation de votre commande pour <strong>${orders.length} semaine(s)</strong> :</p>
+    ${blocs}
+    ${comment ? `<p><strong>Commentaire :</strong> ${comment}</p>` : ""}
+    <p>Merci de votre commande.</p>`;
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json", "api-key": process.env.BREVO_API_KEY },
+    body: JSON.stringify({
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
+      to: [{ email: schoolEmail, name: schoolName }],
+      ...(process.env.KITCHEN_EMAIL ? { cc: [{ email: process.env.KITCHEN_EMAIL }] } : {}),
+      subject: `Confirmation de commande - ${schoolName} - ${orders.length} semaine(s)`,
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) throw new Error(`Brevo a refusé l'envoi : ${await res.text()}`);
+  return res.json();
+}
+
 async function sendNewCodeEmail({ schoolEmail, schoolName, newCode }) {
   const html = `
     <p>Bonjour,</p>
@@ -669,6 +706,19 @@ app.get("/api/cron/send-reminders", async (req, res) => {
 
     const weekKey = nextMondayWeekKey();
     const monday = mondayFromWeekKey(weekKey);
+
+    // Semaine suivante entièrement en vacances : il n'y a rien à commander, donc
+    // aucun rappel. Le prochain rappel partira le jeudi qui précède la première
+    // semaine d'école qui suit.
+    const allHoliday = JOURS.every((j) => {
+      const d = new Date(monday);
+      d.setUTCDate(monday.getUTCDate() + (DAY_OFFSET[j.id] || 0));
+      return holidayFor(d);
+    });
+    if (allHoliday) {
+      return res.json({ ok: true, skipped: true, reason: "Semaine suivante entièrement en vacances scolaires", weekKey, remindersSent: 0, smsSent: 0 });
+    }
+
     const friday = new Date(monday);
     friday.setUTCDate(monday.getUTCDate() + 4);
     const fmt = (d) => `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -774,6 +824,78 @@ app.post("/api/orders", async (req, res) => {
     }
 
     res.json({ ok: true, emailSent, emailError });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+app.post("/api/orders/multi", async (req, res) => {
+  try {
+    const { schoolName, schoolEmail, code, orders, comment } = req.body || {};
+    if (!schoolName || !schoolEmail || !code || !Array.isArray(orders) || !orders.length) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    if (orders.length > 12) {
+      return res.status(400).json({ ok: false, error: "Trop de semaines d'un coup." });
+    }
+    const nameLower = await resolveSchoolId(schoolName);
+    const hash = hashCode(code);
+    const school = await getSchool(nameLower);
+    if (school && school.code_hash !== hash) {
+      return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
+    }
+    if (!school) await upsertSchool(nameLower, schoolName.trim(), hash);
+
+    // Chaque semaine garde sa propre échéance : jeudi 15h (Bruxelles) de la semaine précédente.
+    const nowKey = toComparableKey(brusselsNowFull());
+    const saved = [];
+    const refused = [];
+    for (const o of orders) {
+      if (!o || !o.weekKey || !o.week) continue;
+      const monday = dateForDay(o.weekKey, "lundi");
+      const thursday = new Date(monday);
+      thursday.setUTCDate(monday.getUTCDate() - 4);
+      const deadlineKey = toComparableKey({
+        year: thursday.getUTCFullYear(),
+        month: thursday.getUTCMonth() + 1,
+        day: thursday.getUTCDate(),
+        hour: 15,
+        minute: 0,
+      });
+      if (nowKey > deadlineKey) {
+        refused.push({ weekKey: o.weekKey, reason: "échéance dépassée" });
+        continue;
+      }
+      const weekWithDessert = autoFillDessert(o.week);
+      JOURS.forEach((j) => {
+        if (holidayFor(dateForDay(o.weekKey, j.id))) {
+          weekWithDessert[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+        }
+      });
+      await upsertOrder({
+        week_key: o.weekKey,
+        school_name_lower: nameLower,
+        school_name: schoolName.trim(),
+        school_email: schoolEmail.trim(),
+        week: weekWithDessert,
+        comment: comment || "",
+        submitted_at: new Date().toISOString(),
+      });
+      saved.push({ weekKey: o.weekKey, weekLabel: o.weekLabel || o.weekKey, week: weekWithDessert });
+    }
+
+    let emailSent = false;
+    let emailError = null;
+    if (saved.length) {
+      try {
+        await sendMultiConfirmationEmail({ schoolEmail: schoolEmail.trim(), schoolName: schoolName.trim(), orders: saved, comment });
+        emailSent = true;
+      } catch (e) {
+        emailError = e.message;
+      }
+    }
+    res.json({ ok: true, savedCount: saved.length, refused, emailSent, emailError });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -1380,6 +1502,7 @@ app.get("/api/billing/order-check", async (req, res) => {
     for (let d = new Date(firstDay); d <= lastDay; d.setUTCDate(d.getUTCDate() + 1)) {
       const dow = d.getUTCDay();
       if (![1, 2, 4, 5].includes(dow)) continue; // seuls lundi/mardi/jeudi/vendredi comptent
+      if (holidayFor(new Date(d))) continue; // pas de service en vacances : une semaine de vacances n'est jamais "manquante"
       const wk = getISOWeekKeyForDate(new Date(d));
       if (!weekKeys.includes(wk)) {
         weekKeys.push(wk);
