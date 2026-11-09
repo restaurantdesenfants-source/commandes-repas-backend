@@ -261,20 +261,69 @@ async function resolveSchoolId(schoolName) {
   return found ? found.id : exact;
 }
 
+// "*" plutôt qu'une liste de colonnes : ainsi la colonne parent_id (implantations)
+// est récupérée si elle existe, sans rien casser si elle n'a pas encore été ajoutée.
 async function getAllSchools() {
-  const { data, error } = await supabase.from("schools").select("id, school_name, school_email").order("school_name");
+  const { data, error } = await supabase.from("schools").select("*").order("school_name");
   if (error) throw error;
   return data;
+}
+
+// ---------- Écoles à plusieurs implantations ----------
+// Une école "groupe" (celle qui se connecte, avec son code et son email) peut
+// avoir plusieurs implantations. Chaque implantation est une fiche école normale
+// (nom "École — Implantation"), reliée au groupe par parent_id, avec le même code
+// et le même email. Commandes, rectifications, PDF et alertes fonctionnent donc
+// exactement comme pour n'importe quelle école, implantation par implantation.
+const IMPL_SEP = " — ";
+
+async function getChildren(parentId) {
+  const { data, error } = await supabase.from("schools").select("*").eq("parent_id", parentId).order("school_name");
+  if (error) throw error;
+  return data || [];
+}
+
+// Nom court de l'implantation (sans le nom du groupe devant).
+function implantationLabel(parent, child) {
+  const prefix = parent.school_name + IMPL_SEP;
+  return child.school_name.startsWith(prefix) ? child.school_name.slice(prefix.length) : child.school_name;
+}
+
+function implantationsPayload(parent, children) {
+  return children.map((c) => ({ id: c.id, name: implantationLabel(parent, c), schoolName: c.school_name }));
+}
+
+// Vérifie le nom + code d'une école "groupe" (jamais une implantation elle-même).
+async function authParent(schoolName, code) {
+  if (!schoolName || !code) return { error: "Informations manquantes.", status: 400 };
+  const nameLower = await resolveSchoolId(schoolName);
+  const school = await getSchool(nameLower);
+  if (!school || school.code_hash !== hashCode(code)) return { error: "Code incorrect pour cette école.", status: 401 };
+  if (school.parent_id) return { error: "Connectez-vous avec le nom principal de l'école pour gérer les implantations.", status: 400 };
+  return { school };
+}
+
+function cleanImplantationName(name) {
+  return String(name || "").trim().replace(/\s+/g, " ").slice(0, 60);
 }
 
 function generateNewCode() {
   return String(crypto.randomInt(100000, 999999)); // code à 6 chiffres
 }
 
+// Le code est partagé par une école et toutes ses implantations : on le change
+// partout d'un coup (si on part d'une implantation, on remonte au groupe).
 async function setSchoolNewCode(nameLower, newCode) {
   const hash = hashCode(newCode);
-  const { error } = await supabase.from("schools").update({ code_hash: hash }).eq("id", nameLower);
+  const school = await getSchool(nameLower);
+  const topId = (school && school.parent_id) || nameLower;
+  const { error } = await supabase.from("schools").update({ code_hash: hash }).eq("id", topId);
   if (error) throw error;
+  const children = await getChildren(topId).catch(() => []);
+  for (const c of children) {
+    const { error: e2 } = await supabase.from("schools").update({ code_hash: hash }).eq("id", c.id);
+    if (e2) throw e2;
+  }
 }
 
 // Supprime définitivement une école : ses commandes, ses rectifications, et son
@@ -662,10 +711,14 @@ async function sendAdminEditKitchenEmail({ schoolName, allChangedDays }) {
   return res.json();
 }
 
-async function sendReminderEmail({ schoolEmail, schoolName, weekLabel }) {
+async function sendReminderEmail({ schoolEmail, schoolName, weekLabel, missingImplantations }) {
+  const missingHtml = missingImplantations && missingImplantations.length
+    ? `<p>Implantation(s) encore sans commande : <strong>${missingImplantations.join(", ")}</strong>.</p>`
+    : "";
   const html = `
     <p>Bonjour,</p>
     <p>Petit rappel : nous n'avons pas encore reçu votre commande pour la semaine du <strong>${weekLabel}</strong>.</p>
+    ${missingHtml}
     <p>La date limite est fixée à <strong>aujourd'hui, jeudi à 15h</strong> — il vous reste donc environ 2 heures pour la passer.</p>
     <p>Merci de vous connecter dès que possible pour l'encoder.</p>
   `;
@@ -727,13 +780,30 @@ app.get("/api/cron/send-reminders", async (req, res) => {
     const schools = await getAllSchools();
     const existingOrders = await getOrdersForWeek(weekKey);
     const orderedIds = new Set(existingOrders.map((o) => o.school_name_lower));
-    const toRemind = schools.filter((s) => !orderedIds.has(s.id) && s.school_email);
+    // Écoles à plusieurs implantations : un seul rappel, envoyé à l'école, qui
+    // liste les implantations encore sans commande. Les implantations elles-mêmes
+    // ne reçoivent jamais de rappel séparé.
+    const childrenByParent = {};
+    schools.forEach((s) => {
+      if (s.parent_id) (childrenByParent[s.parent_id] = childrenByParent[s.parent_id] || []).push(s);
+    });
+    const toRemind = [];
+    schools.forEach((s) => {
+      if (s.parent_id || !s.school_email) return;
+      const kids = childrenByParent[s.id];
+      if (kids && kids.length) {
+        const missing = kids.filter((k) => !orderedIds.has(k.id)).map((k) => implantationLabel(s, k));
+        if (missing.length) toRemind.push({ ...s, missingImplantations: missing });
+      } else if (!orderedIds.has(s.id)) {
+        toRemind.push(s);
+      }
+    });
 
     let remindersSent = 0;
     const errors = [];
     for (const s of toRemind) {
       try {
-        await sendReminderEmail({ schoolEmail: s.school_email, schoolName: s.school_name, weekLabel });
+        await sendReminderEmail({ schoolEmail: s.school_email, schoolName: s.school_name, weekLabel, missingImplantations: s.missingImplantations });
         remindersSent++;
       } catch (e) {
         errors.push({ schoolName: s.school_name, error: e.message });
@@ -766,12 +836,29 @@ app.post("/api/access", async (req, res) => {
       if (school.code_hash !== hash) {
         return res.status(401).json({ ok: false, error: "Code incorrect pour cette école." });
       }
-      if (schoolEmail) await upsertSchool(nameLower, schoolName.trim(), hash, schoolEmail.trim());
+      // On garde le nom tel qu'enregistré (pas celui tapé, qui peut différer d'un
+      // accent) pour ne jamais casser le lien avec les implantations.
+      if (schoolEmail) await upsertSchool(nameLower, school.school_name, hash, schoolEmail.trim());
     } else {
       // Toute première commande de cette école : ce code devient son code d'accès.
       await upsertSchool(nameLower, schoolName.trim(), hash, schoolEmail ? schoolEmail.trim() : null);
     }
-    res.json({ ok: true });
+
+    // École à plusieurs implantations : on renvoie la liste, et on garde l'email
+    // des implantations aligné sur celui de l'école (confirmations, rectifications).
+    let implantations = [];
+    if (school && !school.parent_id) {
+      const children = await getChildren(nameLower).catch(() => []);
+      if (children.length && schoolEmail) {
+        for (const c of children) {
+          if (c.school_email !== schoolEmail.trim()) {
+            await supabase.from("schools").update({ school_email: schoolEmail.trim() }).eq("id", c.id);
+          }
+        }
+      }
+      implantations = implantationsPayload(school, children);
+    }
+    res.json({ ok: true, schoolName: school ? school.school_name : schoolName.trim(), implantations });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -896,6 +983,294 @@ app.post("/api/orders/multi", async (req, res) => {
       }
     }
     res.json({ ok: true, savedCount: saved.length, refused, emailSent, emailError });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// ---------- Implantations (gérées par l'école elle-même) ----------
+
+app.post("/api/implantations/add", async (req, res) => {
+  try {
+    const { schoolName, code, name } = req.body || {};
+    const auth = await authParent(schoolName, code);
+    if (auth.error) return res.status(auth.status).json({ ok: false, error: auth.error });
+    const parent = auth.school;
+    const implName = cleanImplantationName(name);
+    if (!implName) return res.status(400).json({ ok: false, error: "Donnez un nom à l'implantation." });
+
+    const children = await getChildren(parent.id);
+    if (children.length >= 10) return res.status(400).json({ ok: false, error: "Maximum 10 implantations." });
+    const fullName = parent.school_name + IMPL_SEP + implName;
+    const id = fullName.toLowerCase();
+    const existingId = await resolveSchoolId(fullName);
+    if (await getSchool(existingId)) {
+      return res.status(409).json({ ok: false, error: "Une implantation porte déjà ce nom." });
+    }
+    const { error } = await supabase.from("schools").insert({
+      id,
+      school_name: fullName,
+      code_hash: parent.code_hash,
+      school_email: parent.school_email || null,
+      parent_id: parent.id,
+    });
+    if (error) throw error;
+    const updated = await getChildren(parent.id);
+    res.json({ ok: true, implantations: implantationsPayload(parent, updated) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Renomme une implantation : tout son historique (commandes, rectifications,
+// suppléments dessert) suit le nouveau nom, rien n'est perdu.
+app.post("/api/implantations/rename", async (req, res) => {
+  try {
+    const { schoolName, code, id, name } = req.body || {};
+    const auth = await authParent(schoolName, code);
+    if (auth.error) return res.status(auth.status).json({ ok: false, error: auth.error });
+    const parent = auth.school;
+    const child = await getSchool(id);
+    if (!child || child.parent_id !== parent.id) return res.status(404).json({ ok: false, error: "Implantation introuvable." });
+    const implName = cleanImplantationName(name);
+    if (!implName) return res.status(400).json({ ok: false, error: "Donnez un nom à l'implantation." });
+
+    const newFullName = parent.school_name + IMPL_SEP + implName;
+    const newId = newFullName.toLowerCase();
+    if (newFullName === child.school_name) {
+      return res.json({ ok: true, implantations: implantationsPayload(parent, await getChildren(parent.id)) });
+    }
+    if (newId !== child.id) {
+      const clashId = await resolveSchoolId(newFullName);
+      if (clashId !== child.id && (await getSchool(clashId))) {
+        return res.status(409).json({ ok: false, error: "Une implantation porte déjà ce nom." });
+      }
+    }
+
+    if (newId === child.id) {
+      // Seule la casse change : simple mise à jour du nom affiché.
+      const { error } = await supabase.from("schools").update({ school_name: newFullName }).eq("id", child.id);
+      if (error) throw error;
+    } else {
+      const { error: e1 } = await supabase.from("schools").insert({
+        id: newId,
+        school_name: newFullName,
+        code_hash: child.code_hash,
+        school_email: child.school_email,
+        parent_id: parent.id,
+      });
+      if (e1) throw e1;
+      const { error: e2 } = await supabase
+        .from("orders")
+        .update({ school_name_lower: newId, school_name: newFullName })
+        .eq("school_name_lower", child.id);
+      if (e2) throw e2;
+      await deleteSchoolRecordOnly(child.id);
+    }
+    await supabase.from("orders").update({ school_name: newFullName }).eq("school_name_lower", newId);
+    await reassignCorrectionsSchoolName(child.school_name, newFullName);
+    await reassignDessertSupplementsSchoolName(child.school_name, newFullName);
+
+    res.json({ ok: true, implantations: implantationsPayload(parent, await getChildren(parent.id)) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Supprime une implantation, uniquement si elle n'a encore jamais rien commandé
+// (sinon l'historique de facturation serait perdu : c'est alors la cuisine qui gère).
+app.post("/api/implantations/delete", async (req, res) => {
+  try {
+    const { schoolName, code, id } = req.body || {};
+    const auth = await authParent(schoolName, code);
+    if (auth.error) return res.status(auth.status).json({ ok: false, error: auth.error });
+    const parent = auth.school;
+    const child = await getSchool(id);
+    if (!child || child.parent_id !== parent.id) return res.status(404).json({ ok: false, error: "Implantation introuvable." });
+    const orders = await getOrdersForSchool(child.id);
+    if (orders.length) {
+      return res.status(409).json({
+        ok: false,
+        error: "Cette implantation a déjà des commandes : elle ne peut pas être supprimée d'ici. Contactez la cuisine.",
+      });
+    }
+    await deleteSchoolRecordOnly(child.id);
+    res.json({ ok: true, implantations: implantationsPayload(parent, await getChildren(parent.id)) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Email de confirmation unique pour une commande groupée (toutes les implantations,
+// une ou plusieurs semaines), envoyé à l'école avec copie cuisine.
+async function sendGroupConfirmationEmail({ schoolEmail, schoolName, saved, comment }) {
+  const th = "padding:6px 10px;border:1px solid #ddd";
+  const byWeek = {};
+  saved.forEach((s) => {
+    if (!byWeek[s.weekKey]) byWeek[s.weekKey] = { weekLabel: s.weekLabel, items: [] };
+    byWeek[s.weekKey].items.push(s);
+  });
+  const blocs = Object.keys(byWeek)
+    .sort()
+    .map((wk) => {
+      const w = byWeek[wk];
+      const tables = w.items
+        .map((it) => {
+          const lignes = JOURS.map((j) => {
+            const d = it.week[j.id] || {};
+            return `<tr><td style="${th}">${j.label}</td><td style="${th}">${d.soupe || 0} L</td><td style="${th}">${d.maternelle || 0}</td><td style="${th}">${d.primaire || 0}</td><td style="${th}">${d.primairePlus || 0}</td></tr>`;
+          }).join("");
+          return `<p style="margin:12px 0 4px"><strong>📍 ${it.implantation}</strong></p>
+          <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
+            <tr style="background:#f2efe5"><th style="${th}">Jour</th><th style="${th}">Soupe</th><th style="${th}">Maternelle</th><th style="${th}">Primaire</th><th style="${th}">Primaire +</th></tr>
+            ${lignes}
+          </table>`;
+        })
+        .join("");
+      return `<h3 style="margin-top:22px;font-family:sans-serif">Semaine du ${w.weekLabel}</h3>${tables}`;
+    })
+    .join("");
+  const weeksCount = Object.keys(byWeek).length;
+  const html = `<p>Bonjour,</p>
+    <p>Voici la confirmation de votre commande${weeksCount > 1 ? ` pour <strong>${weeksCount} semaines</strong>` : ""}, implantation par implantation :</p>
+    ${blocs}
+    ${comment ? `<p><strong>Commentaire :</strong> ${comment}</p>` : ""}
+    <p>Merci de votre commande.</p>`;
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json", "api-key": process.env.BREVO_API_KEY },
+    body: JSON.stringify({
+      sender: { name: process.env.SENDER_NAME || "Restaurant", email: process.env.SENDER_EMAIL },
+      to: [{ email: schoolEmail, name: schoolName }],
+      ...(process.env.KITCHEN_EMAIL ? { cc: [{ email: process.env.KITCHEN_EMAIL }] } : {}),
+      subject: `Confirmation de commande - ${schoolName}` + (weeksCount > 1 ? ` - ${weeksCount} semaines` : ` - semaine du ${saved[0].weekLabel}`),
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) throw new Error(`Brevo a refusé l'envoi : ${await res.text()}`);
+  return res.json();
+}
+
+// Commande groupée : l'école envoie en une fois les quantités de chacune de ses
+// implantations, pour une ou plusieurs semaines. Chaque implantation est
+// enregistrée comme une commande normale ; un seul email récapitulatif part.
+app.post("/api/orders/group", async (req, res) => {
+  try {
+    const { schoolName, schoolEmail, code, orders, comment } = req.body || {};
+    if (!schoolEmail || !Array.isArray(orders) || !orders.length) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    if (orders.length > 120) return res.status(400).json({ ok: false, error: "Trop de lignes d'un coup." });
+    const auth = await authParent(schoolName, code);
+    if (auth.error) return res.status(auth.status).json({ ok: false, error: auth.error });
+    const parent = auth.school;
+    const children = await getChildren(parent.id);
+    const childById = Object.fromEntries(children.map((c) => [c.id, c]));
+
+    const nowKey = toComparableKey(brusselsNowFull());
+    const saved = [];
+    const refused = [];
+    const skippedEmpty = [];
+    for (const o of orders) {
+      if (!o || !o.weekKey || !o.week || !o.schoolId) continue;
+      const child = childById[o.schoolId];
+      if (!child) {
+        refused.push({ weekKey: o.weekKey, reason: "implantation inconnue" });
+        continue;
+      }
+      const label = implantationLabel(parent, child);
+      // Même échéance que partout ailleurs : jeudi 15h (Bruxelles) de la semaine précédente.
+      const monday = dateForDay(o.weekKey, "lundi");
+      const thursday = new Date(monday);
+      thursday.setUTCDate(monday.getUTCDate() - 4);
+      const deadlineKey = toComparableKey({
+        year: thursday.getUTCFullYear(),
+        month: thursday.getUTCMonth() + 1,
+        day: thursday.getUTCDate(),
+        hour: 15,
+        minute: 0,
+      });
+      if (nowKey > deadlineKey) {
+        refused.push({ weekKey: o.weekKey, implantation: label, reason: "échéance dépassée" });
+        continue;
+      }
+      const weekWithDessert = autoFillDessert(o.week);
+      JOURS.forEach((j) => {
+        if (holidayFor(dateForDay(o.weekKey, j.id))) {
+          weekWithDessert[j.id] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+        }
+      });
+      const totalRepas = JOURS.reduce((acc, j) => {
+        const d = weekWithDessert[j.id];
+        return acc + Number(d.maternelle || 0) + Number(d.primaire || 0) + Number(d.primairePlus || 0) + Number(d.soupe || 0);
+      }, 0);
+      // Implantation laissée à zéro : on n'enregistre rien (pour ne pas créer de
+      // fausse commande vide), sauf s'il existait déjà une commande à remplacer.
+      if (!totalRepas && !(await getOrder(o.weekKey, child.id))) {
+        skippedEmpty.push({ weekKey: o.weekKey, implantation: label });
+        continue;
+      }
+      await upsertOrder({
+        week_key: o.weekKey,
+        school_name_lower: child.id,
+        school_name: child.school_name,
+        school_email: schoolEmail.trim(),
+        week: weekWithDessert,
+        comment: comment || "",
+        submitted_at: new Date().toISOString(),
+      });
+      saved.push({ weekKey: o.weekKey, weekLabel: o.weekLabel || o.weekKey, implantation: label, week: weekWithDessert });
+    }
+
+    let emailSent = false;
+    let emailError = null;
+    if (saved.length) {
+      try {
+        await sendGroupConfirmationEmail({ schoolEmail: schoolEmail.trim(), schoolName: parent.school_name, saved, comment });
+        emailSent = true;
+      } catch (e) {
+        emailError = e.message;
+      }
+    }
+    res.json({
+      ok: true,
+      savedCount: saved.length,
+      savedWeeks: [...new Set(saved.map((s) => s.weekKey))].length,
+      refused,
+      skippedEmpty,
+      emailSent,
+      emailError,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Commandes déjà enregistrées pour chaque implantation d'une école, sur une
+// semaine donnée (pour pré-remplir et savoir ce qui est déjà commandé).
+app.post("/api/orders/group-mine", async (req, res) => {
+  try {
+    const { schoolName, code, weekKeys } = req.body || {};
+    const auth = await authParent(schoolName, code);
+    if (auth.error) return res.status(auth.status).json({ ok: false, error: auth.error });
+    const children = await getChildren(auth.school.id);
+    const keys = Array.isArray(weekKeys) ? weekKeys.slice(0, 20) : [];
+    const result = {};
+    for (const wk of keys) {
+      const rows = await getOrdersForWeek(wk);
+      result[wk] = {};
+      children.forEach((c) => {
+        const row = rows.find((r) => r.school_name_lower === c.id);
+        result[wk][c.id] = row ? { week: row.week, comment: row.comment } : null;
+      });
+    }
+    res.json({ ok: true, orders: result });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -1168,7 +1543,7 @@ app.get("/api/schools", async (req, res) => {
     const schools = await getAllSchools();
     res.json({
       ok: true,
-      schools: schools.map((s) => ({ id: s.id, schoolName: s.school_name, schoolEmail: s.school_email || null })),
+      schools: schools.map((s) => ({ id: s.id, schoolName: s.school_name, schoolEmail: s.school_email || null, parentId: s.parent_id || null })),
     });
   } catch (e) {
     console.error(e);
@@ -1202,7 +1577,10 @@ app.post("/api/schools/reset-code", async (req, res) => {
 
     const newCode = generateNewCode();
     await setSchoolNewCode(nameLower, newCode);
-    await sendNewCodeEmail({ schoolEmail: school.school_email, schoolName: school.school_name, newCode });
+    // Pour une implantation, le code est celui de l'école principale : on l'annonce sous ce nom-là.
+    const parent = school.parent_id ? await getSchool(school.parent_id) : null;
+    const target = parent || school;
+    await sendNewCodeEmail({ schoolEmail: target.school_email || school.school_email, schoolName: target.school_name, newCode });
 
     res.json({ ok: true });
   } catch (e) {
@@ -1226,6 +1604,13 @@ app.post("/api/schools/delete", async (req, res) => {
     const school = await getSchool(nameLower);
     if (!school) {
       return res.status(404).json({ ok: false, error: "École introuvable." });
+    }
+    const children = await getChildren(nameLower).catch(() => []);
+    if (children.length) {
+      return res.status(409).json({
+        ok: false,
+        error: `Cette école a ${children.length} implantation(s). Supprimez d'abord chaque implantation, puis l'école.`,
+      });
     }
     await deleteSchool(nameLower, school.school_name);
     res.json({ ok: true });
@@ -1473,7 +1858,17 @@ app.get("/api/billing", async (req, res) => {
     totals.soupe = round2(totals.soupe);
     totals.soupeIncluse = round2(totals.soupeIncluse);
 
-    res.json({ ok: true, schools, totals, corrections: correctionsThisMonth, dessertSupplementEntries });
+    // Écoles à plusieurs implantations, pour la facture unique par groupe.
+    const allSchools = await getAllSchools();
+    const groups = allSchools
+      .filter((p) => !p.parent_id && allSchools.some((c) => c.parent_id === p.id))
+      .map((p) => ({
+        id: p.id,
+        schoolName: p.school_name,
+        implantations: allSchools.filter((c) => c.parent_id === p.id).map((c) => c.school_name),
+      }));
+
+    res.json({ ok: true, schools, totals, corrections: correctionsThisMonth, dessertSupplementEntries, groups });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
@@ -1514,7 +1909,11 @@ app.get("/api/billing/order-check", async (req, res) => {
       }
     }
 
-    const schools = await getAllSchools();
+    // Une école "groupe" ne commande jamais elle-même : ce sont ses implantations
+    // qui commandent (et qui sont vérifiées une par une).
+    const allSchools = await getAllSchools();
+    const parentIds = new Set(allSchools.filter((s) => s.parent_id).map((s) => s.parent_id));
+    const schools = allSchools.filter((s) => !parentIds.has(s.id));
     const issues = [];
     for (const wk of weekKeys) {
       const rows = await getOrdersForWeek(wk);
@@ -1646,9 +2045,126 @@ function drawPdfRow(doc, x0, y, rowHeight, cells, opts = {}) {
       .text(String(cells[col.key] ?? ""), x + 3, y + rowHeight / 2 - (opts.fontSize || 8.5) / 2, {
         width: col.width - 6,
         align: col.key === "label" ? "left" : "center",
+        // Nom d'implantation trop long : coupé proprement au lieu de déborder.
+        ...(col.key === "label" ? { height: rowHeight - 2, ellipsis: true } : {}),
       });
     x += col.width;
   });
+}
+
+// Calcule, pour une école (nom exact) et un mois, les lignes jour par jour
+// « commandé / rectifié » et leurs totaux. Partagé par le PDF école et le PDF groupe.
+async function buildSchoolMonthData(displayName, month, cache = {}) {
+  const days = schoolDaysInMonth(month);
+  const weekKeys = [...new Set(days.map((d) => d.weekKey))];
+
+  const ordersByWeek = {};
+  const correctionsByWeek = {};
+  for (const wk of weekKeys) {
+    if (!cache[wk]) cache[wk] = { orders: await getOrdersForWeek(wk), corrections: await getCorrectionsForWeek(wk) };
+    ordersByWeek[wk] = cache[wk].orders.find((r) => String(r.school_name || "").trim() === displayName) || null;
+    correctionsByWeek[wk] = cache[wk].corrections.filter((c) => String(c.school_name || "").trim() === displayName);
+  }
+
+  const rows = [];
+  const totalsCmd = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
+  const totalsRect = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
+
+  days.forEach((d) => {
+    const order = ordersByWeek[d.weekKey];
+    const finalValues = (order && order.week && order.week[d.dayId]) || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
+    const correctionsForDay = (correctionsByWeek[d.weekKey] || []).filter((c) => c.day_id === d.dayId);
+    const originalValues = computeOriginalValues(finalValues, correctionsForDay);
+
+    const dayLabel = JOURS.find((j) => j.id === d.dayId)?.label || d.dayId;
+    const dateStr = `${String(d.date.getUTCDate()).padStart(2, "0")}/${String(d.date.getUTCMonth() + 1).padStart(2, "0")}`;
+
+    ["maternelle", "primaire", "primairePlus", "soupe", "dessert"].forEach((f) => {
+      totalsCmd[f] += Number(originalValues[f] || 0);
+      totalsRect[f] += Number(finalValues[f] || 0);
+    });
+
+    rows.push({
+      label: `${dayLabel} ${dateStr}`,
+      maternelleCmd: originalValues.maternelle || 0,
+      maternelleRect: finalValues.maternelle || 0,
+      primaireCmd: originalValues.primaire || 0,
+      primaireRect: finalValues.primaire || 0,
+      primairePlusCmd: originalValues.primairePlus || 0,
+      primairePlusRect: finalValues.primairePlus || 0,
+      soupeCmd: Math.round((originalValues.soupe || 0) * 100) / 100,
+      soupeRect: Math.round((finalValues.soupe || 0) * 100) / 100,
+      dessertCmd: originalValues.dessert || 0,
+      dessertRect: finalValues.dessert || 0,
+    });
+  });
+
+  return { rows, totalsCmd, totalsRect };
+}
+
+function totalsRow(label, totalsCmd, totalsRect) {
+  return {
+    label,
+    maternelleCmd: totalsCmd.maternelle,
+    maternelleRect: totalsRect.maternelle,
+    primaireCmd: totalsCmd.primaire,
+    primaireRect: totalsRect.primaire,
+    primairePlusCmd: totalsCmd.primairePlus,
+    primairePlusRect: totalsRect.primairePlus,
+    soupeCmd: Math.round(totalsCmd.soupe * 100) / 100,
+    soupeRect: Math.round(totalsRect.soupe * 100) / 100,
+    dessertCmd: totalsCmd.dessert,
+    dessertRect: totalsRect.dessert,
+  };
+}
+
+function pdfHeaderCells() {
+  return Object.fromEntries(PDF_COLS.map((c) => [c.key, c.title]));
+}
+
+// Dessine un tableau (en-tête + lignes + ligne de total) à partir de la position
+// courante, en passant à la page suivante si nécessaire. Renvoie le y final.
+function drawPdfTable(doc, rows, totalRowCells) {
+  const x0 = doc.page.margins.left;
+  let y = doc.y;
+  const headerHeight = 28;
+  const rowHeight = 18;
+
+  drawPdfRow(doc, x0, y, headerHeight, pdfHeaderCells(), { bold: true, bg: "#f1ece0", fontSize: 7.5 });
+  y += headerHeight;
+
+  rows.forEach((r) => {
+    if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 40) {
+      doc.addPage();
+      y = doc.page.margins.top;
+      drawPdfRow(doc, x0, y, headerHeight, pdfHeaderCells(), { bold: true, bg: "#f1ece0", fontSize: 7.5 });
+      y += headerHeight;
+    }
+    drawPdfRow(doc, x0, y, rowHeight, r);
+    y += rowHeight;
+  });
+
+  if (totalRowCells) {
+    if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 40) {
+      doc.addPage();
+      y = doc.page.margins.top;
+    }
+    drawPdfRow(doc, x0, y, rowHeight, totalRowCells, { bold: true, bg: "#f1ece0" });
+    y += rowHeight;
+  }
+  return y;
+}
+
+const PDF_FOOTNOTE =
+  "« commandé » = quantité initialement envoyée par l'école. « rectifié » = quantité finale après d'éventuelles corrections (école ou cuisine). La soupe incluse (0,2L/repas) et le dessert automatique (1/repas) ne sont pas comptés séparément ici : la colonne Soupe correspond à la soupe commandée en plus, et Dessert au nombre total de desserts.";
+
+function drawPdfFootnote(doc, y) {
+  const x0 = doc.page.margins.left;
+  doc
+    .font("Helvetica")
+    .fontSize(8.5)
+    .fillColor("#6b6054")
+    .text(PDF_FOOTNOTE, x0, y, { width: doc.page.width - x0 - doc.page.margins.right });
 }
 
 app.get("/api/billing/school-pdf", async (req, res) => {
@@ -1667,113 +2183,77 @@ app.get("/api/billing/school-pdf", async (req, res) => {
     // elle servirait à confondre deux écoles au nom très ressemblant, ce qui est
     // justement le contraire de ce qu'il faut pour distinguer deux fiches en doublon.
     const displayName = String(schoolName).trim();
-
-    const days = schoolDaysInMonth(month);
-    const weekKeys = [...new Set(days.map((d) => d.weekKey))];
-
-    const ordersByWeek = {};
-    const correctionsByWeek = {};
-    for (const wk of weekKeys) {
-      const rowsThisWeek = await getOrdersForWeek(wk);
-      ordersByWeek[wk] = rowsThisWeek.find((r) => String(r.school_name || "").trim() === displayName) || null;
-      const allCorrectionsThisWeek = await getCorrectionsForWeek(wk);
-      correctionsByWeek[wk] = allCorrectionsThisWeek.filter(
-        (c) => String(c.school_name || "").trim() === displayName
-      );
-    }
-
-    const rows = [];
-    const totalsCmd = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
-    const totalsRect = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
-
-    days.forEach((d) => {
-      const order = ordersByWeek[d.weekKey];
-      const finalValues = (order && order.week && order.week[d.dayId]) || { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 };
-      const correctionsForDay = (correctionsByWeek[d.weekKey] || []).filter((c) => c.day_id === d.dayId);
-      const originalValues = computeOriginalValues(finalValues, correctionsForDay);
-
-      const dayLabel = JOURS.find((j) => j.id === d.dayId)?.label || d.dayId;
-      const dateStr = `${String(d.date.getUTCDate()).padStart(2, "0")}/${String(d.date.getUTCMonth() + 1).padStart(2, "0")}`;
-
-      ["maternelle", "primaire", "primairePlus", "soupe", "dessert"].forEach((f) => {
-        totalsCmd[f] += Number(originalValues[f] || 0);
-        totalsRect[f] += Number(finalValues[f] || 0);
-      });
-
-      rows.push({
-        label: `${dayLabel} ${dateStr}`,
-        maternelleCmd: originalValues.maternelle || 0,
-        maternelleRect: finalValues.maternelle || 0,
-        primaireCmd: originalValues.primaire || 0,
-        primaireRect: finalValues.primaire || 0,
-        primairePlusCmd: originalValues.primairePlus || 0,
-        primairePlusRect: finalValues.primairePlus || 0,
-        soupeCmd: Math.round((originalValues.soupe || 0) * 100) / 100,
-        soupeRect: Math.round((finalValues.soupe || 0) * 100) / 100,
-        dessertCmd: originalValues.dessert || 0,
-        dessertRect: finalValues.dessert || 0,
-      });
-    });
+    const { rows, totalsCmd, totalsRect } = await buildSchoolMonthData(displayName, month);
 
     const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 30 });
-    const fileSafeMonth = month;
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="recapitulatif-${displayName.replace(/[^a-z0-9]+/gi, "_")}-${fileSafeMonth}.pdf"`);
+    res.setHeader("Content-Disposition", `attachment; filename="recapitulatif-${displayName.replace(/[^a-z0-9]+/gi, "_")}-${month}.pdf"`);
     doc.pipe(res);
 
     doc.font("Helvetica-Bold").fontSize(16).fillColor("#24302a").text(`Récapitulatif mensuel — ${displayName}`);
     doc.font("Helvetica").fontSize(11).fillColor("#6b6054").text(`${monthLabelFr(month)} — généré le ${new Date().toLocaleDateString("fr-FR")}`);
     doc.moveDown(0.8);
 
-    const x0 = doc.page.margins.left;
-    let y = doc.y;
-    const headerHeight = 28;
-    const rowHeight = 18;
+    const y = drawPdfTable(doc, rows, totalsRow("TOTAL", totalsCmd, totalsRect));
+    drawPdfFootnote(doc, y + 16);
 
-    drawPdfRow(doc, x0, y, headerHeight, Object.fromEntries(PDF_COLS.map((c) => [c.key, c.title])), { bold: true, bg: "#f1ece0", fontSize: 7.5 });
-    y += headerHeight;
+    doc.end();
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
 
-    rows.forEach((r) => {
-      if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 40) {
-        doc.addPage();
-        y = doc.page.margins.top;
-        drawPdfRow(doc, x0, y, headerHeight, Object.fromEntries(PDF_COLS.map((c) => [c.key, c.title])), { bold: true, bg: "#f1ece0", fontSize: 7.5 });
-        y += headerHeight;
-      }
-      drawPdfRow(doc, x0, y, rowHeight, r);
-      y += rowHeight;
-    });
-
-    const totalRow = {
-      label: "TOTAL",
-      maternelleCmd: totalsCmd.maternelle,
-      maternelleRect: totalsRect.maternelle,
-      primaireCmd: totalsCmd.primaire,
-      primaireRect: totalsRect.primaire,
-      primairePlusCmd: totalsCmd.primairePlus,
-      primairePlusRect: totalsRect.primairePlus,
-      soupeCmd: Math.round(totalsCmd.soupe * 100) / 100,
-      soupeRect: Math.round(totalsRect.soupe * 100) / 100,
-      dessertCmd: totalsCmd.dessert,
-      dessertRect: totalsRect.dessert,
-    };
-    if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 40) {
-      doc.addPage();
-      y = doc.page.margins.top;
+// Récapitulatif mensuel unique pour une école à plusieurs implantations : une
+// page de synthèse (une ligne par implantation + total général, base de la
+// facture unique), puis le détail jour par jour de chaque implantation.
+app.get("/api/billing/group-pdf", async (req, res) => {
+  try {
+    const { month, groupId, code } = req.query;
+    if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+      return res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
     }
-    drawPdfRow(doc, x0, y, rowHeight, totalRow, { bold: true, bg: "#f1ece0" });
-    y += rowHeight + 16;
+    if (!month || !/^\d{4}-\d{2}$/.test(month) || !groupId) {
+      return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    }
+    const parent = await getSchool(groupId);
+    if (!parent) return res.status(404).json({ ok: false, error: "École introuvable." });
+    const children = await getChildren(parent.id);
+    if (!children.length) return res.status(400).json({ ok: false, error: "Cette école n'a pas d'implantation." });
 
-    doc
-      .font("Helvetica")
-      .fontSize(8.5)
-      .fillColor("#6b6054")
-      .text(
-        "« commandé » = quantité initialement envoyée par l'école. « rectifié » = quantité finale après d'éventuelles corrections (école ou cuisine). La soupe incluse (0,2L/repas) et le dessert automatique (1/repas) ne sont pas comptés séparément ici : la colonne Soupe correspond à la soupe commandée en plus, et Dessert au nombre total de desserts.",
-        x0,
-        y,
-        { width: doc.page.width - x0 - doc.page.margins.right }
-      );
+    const cache = {};
+    const parts = [];
+    for (const c of children) {
+      const data = await buildSchoolMonthData(String(c.school_name).trim(), month, cache);
+      parts.push({ name: implantationLabel(parent, c), fullName: c.school_name, ...data });
+    }
+    const sumTotals = (key) => {
+      const t = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, dessert: 0 };
+      parts.forEach((p) => Object.keys(t).forEach((f) => (t[f] += Number(p[key][f] || 0))));
+      return t;
+    };
+
+    const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 30 });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="recapitulatif-groupe-${parent.school_name.replace(/[^a-z0-9]+/gi, "_")}-${month}.pdf"`);
+    doc.pipe(res);
+
+    doc.font("Helvetica-Bold").fontSize(16).fillColor("#24302a").text(`Récapitulatif mensuel — ${parent.school_name}`);
+    doc.font("Helvetica").fontSize(11).fillColor("#6b6054").text(`${monthLabelFr(month)} — ${children.length} implantations — généré le ${new Date().toLocaleDateString("fr-FR")}`);
+    doc.moveDown(0.8);
+    doc.font("Helvetica-Bold").fontSize(12).fillColor("#24302a").text("Synthèse par implantation");
+    doc.moveDown(0.4);
+    const summaryRows = parts.map((p) => totalsRow(p.name, p.totalsCmd, p.totalsRect));
+    let y = drawPdfTable(doc, summaryRows, totalsRow("TOTAL GROUPE", sumTotals("totalsCmd"), sumTotals("totalsRect")));
+    drawPdfFootnote(doc, y + 16);
+
+    parts.forEach((p) => {
+      doc.addPage();
+      doc.font("Helvetica-Bold").fontSize(14).fillColor("#24302a").text(`Implantation : ${p.name}`);
+      doc.font("Helvetica").fontSize(10).fillColor("#6b6054").text(`${p.fullName} — ${monthLabelFr(month)}`);
+      doc.moveDown(0.6);
+      drawPdfTable(doc, p.rows, totalsRow("TOTAL", p.totalsCmd, p.totalsRect));
+    });
 
     doc.end();
   } catch (e) {
