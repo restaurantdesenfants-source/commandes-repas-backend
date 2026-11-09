@@ -353,3 +353,21 @@ td.school-col { font-weight: 500; font-family: 'Work Sans', sans-serif; }
   text-align: center;
   color: #8a9188;
 }
+
+/* ---- Implantations (écoles à plusieurs sites) ---- */
+.impl-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
+.impl-tab {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.impl-tab.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+.impl-tab .impl-count { font-family: 'IBM Plex Mono', monospace; font-size: 12px; opacity: .75; margin-left: 6px; }
+.impl-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.impl-row input[type="text"] { flex: 1; width: auto; min-width: 140px; margin-bottom: 0; padding: 9px 12px; font-size: 15px; }
+.impl-current { font-size: 13px; color: #4a564c; margin: 0 0 14px; }

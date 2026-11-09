@@ -199,6 +199,11 @@ async function loadDirectory() {
         <div class="school-block-head" style="margin-bottom:6px">
           <span class="school-name">${s.schoolName}</span>
         </div>
+        ${s.parentId
+          ? `<p class="help-text-small" style="margin-top:0">📍 Implantation — même code et même email que l'école principale</p>`
+          : (data.schools.some((c) => c.parentId === s.id)
+              ? `<p class="help-text-small" style="margin-top:0">🏫 École principale — ${data.schools.filter((c) => c.parentId === s.id).length} implantation(s). Un nouveau code vaut pour toutes.</p>`
+              : "")}
         <p class="help-text-small" style="margin-top:0">${s.schoolEmail || "<span style='opacity:.5'>email non renseigné</span>"}</p>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
           <button class="primary-btn" style="width:auto;padding:9px 16px" data-reset="${s.schoolName}">Envoyer un nouveau code</button>
@@ -395,6 +400,35 @@ async function runOrderCheck() {
 
 let lastMonthData = null;
 
+// Écoles à plusieurs implantations : total cumulé de toutes leurs implantations
+// et un PDF unique (synthèse + détail par implantation) pour la facture.
+function renderGroupsSection(data) {
+  const groups = data.groups || [];
+  if (!groups.length) return "";
+  const byName = Object.fromEntries((data.schools || []).map((s) => [s.schoolName, s]));
+  return `<p class="section-title">Écoles à plusieurs implantations (facture unique)</p>` + groups.map((g) => {
+    const t = { maternelle: 0, primaire: 0, primairePlus: 0, soupe: 0, soupeIncluse: 0, dessert: 0, dessertSupplement: 0 };
+    g.implantations.forEach((name) => {
+      const s = byName[name];
+      if (s) Object.keys(t).forEach((k) => (t[k] += Number(s[k] || 0)));
+    });
+    const total = t.maternelle + t.primaire + t.primairePlus;
+    const r2 = (n) => Math.round(n * 100) / 100;
+    return `
+      <div class="school-block" style="border-color:#c9a227">
+        <div class="school-block-head">
+          <span class="school-name">🏫 ${g.schoolName}</span>
+          <span class="school-totals">${total} repas · ${r2(t.soupe)} L cmd + ${r2(t.soupeIncluse)} L incluse = ${r2(t.soupe + t.soupeIncluse)} L soupe totale</span>
+        </div>
+        <p class="help-text-small" style="margin-top:0">
+          Maternelle : ${t.maternelle} · Primaire : ${t.primaire} · Primaire + : ${t.primairePlus} · Dessert : ${t.dessert} · Suppléments dessert : ${t.dessertSupplement}
+        </p>
+        <p class="help-text-small" style="margin-top:0">Implantations : ${g.implantations.join(" · ")} (détail de chacune plus bas)</p>
+        <a class="link-btn" style="display:inline-block;margin-top:4px" href="/api/billing/group-pdf?code=${encodeURIComponent(kitchenCode)}&month=${encodeURIComponent(selectedMonth)}&groupId=${encodeURIComponent(g.id)}" target="_blank">📄 Télécharger le récapitulatif PDF du groupe</a>
+      </div>`;
+  }).join("");
+}
+
 function renderMonth(data) {
   lastMonthData = data;
   const el = document.getElementById("month-content");
@@ -424,6 +458,7 @@ function renderMonth(data) {
     </div>
     <p class="total-row" style="margin-top:4px"><span>Total repas du mois (toutes écoles)</span><span class="total-value">${grandTotal}</span></p>
 
+    ${renderGroupsSection(data)}
     <p class="section-title">Détail par école</p>
   `;
 

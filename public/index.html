@@ -45,6 +45,9 @@
       <button class="link-btn" id="btn-change-school">Changer d'école</button>
     </div>
 
+    <!-- Implantations : onglets (une commande par site) + gestion des noms -->
+    <div id="impl-card"></div>
+
     <div id="correction-card" style="display:none"></div>
 
     <label class="checkbox-row">
@@ -73,6 +76,7 @@
     <p class="total-row" style="margin-top:-10px;font-size:12.5px"><span>— dont primaire</span><span class="total-value" id="total-primaire" style="font-size:14px">0</span></p>
     <p class="total-row" style="margin-top:-10px;font-size:12.5px"><span>— dont primaire +</span><span class="total-value" id="total-primaire-plus" style="font-size:14px">0</span></p>
     <p class="total-row" style="margin-top:-4px"><span>Total soupe / semaine</span><span class="total-value" id="total-soupe">0 L</span></p>
+    <div id="group-totals" style="display:none"></div>
 
     <label class="field-label">Commentaire (optionnel)</label>
     <textarea id="input-comment" rows="3" placeholder="Toute précision utile pour la cuisine…"></textarea>
@@ -92,6 +96,207 @@ let accessCode = "";
 let week = emptyWeek();
 let sameAllWeek = false;
 let target = null;
+
+// ---- Écoles à plusieurs implantations ----
+// implantations : [{ id, name, schoolName }] renvoyé par le serveur.
+// Chaque implantation a sa propre grille de la semaine (weeks[id]) ; "week"
+// pointe toujours sur celle de l'onglet affiché.
+let implantations = [];
+let currentImpl = null;
+let weeks = {};
+let sameByImpl = {};
+let implManageOpen = false;
+
+function hasImplantations() {
+  return implantations.length > 0;
+}
+
+// Nom à utiliser pour tout ce qui concerne UNE fiche précise (rectifications…).
+function activeSchoolName() {
+  const impl = implantations.find((i) => i.id === currentImpl);
+  return impl ? impl.schoolName : schoolName;
+}
+
+function weekHasMeals(w) {
+  return JOURS.some((j) => Number(w[j.id].maternelle || 0) + Number(w[j.id].primaire || 0) + Number(w[j.id].primairePlus || 0) > 0);
+}
+
+function mealsOf(w) {
+  return JOURS.reduce((acc, j) => acc + Number(w[j.id].maternelle || 0) + Number(w[j.id].primaire || 0) + Number(w[j.id].primairePlus || 0), 0);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Met à jour la liste reçue du serveur en gardant ce qui a déjà été saisi.
+// renamed = { from: ancienId, toName: nouveauNom } pour suivre un renommage.
+function applyImplantations(list, renamed) {
+  const hadNone = !hasImplantations();
+  const newWeeks = {};
+  const newSame = {};
+  list.forEach((i) => {
+    let fromId = i.id;
+    if (renamed && i.name === renamed.toName && !weeks[i.id]) fromId = renamed.from;
+    newWeeks[i.id] = weeks[fromId] || emptyWeek();
+    newSame[i.id] = !!sameByImpl[fromId];
+  });
+  // Première implantation créée : ce qui était déjà saisi passe dans celle-ci.
+  if (hadNone && list.length) {
+    newWeeks[list[0].id] = week;
+    newSame[list[0].id] = sameAllWeek;
+  }
+  if (renamed && currentImpl === renamed.from) {
+    const r = list.find((i) => i.name === renamed.toName);
+    if (r) currentImpl = r.id;
+  }
+  implantations = list;
+  weeks = newWeeks;
+  sameByImpl = newSame;
+  if (!list.find((i) => i.id === currentImpl)) currentImpl = list.length ? list[0].id : null;
+  selectImpl(currentImpl, true);
+}
+
+function selectImpl(id, force) {
+  if (!force && id === currentImpl) return;
+  currentImpl = id;
+  if (id) {
+    week = weeks[id];
+    sameAllWeek = !!sameByImpl[id];
+  } else {
+    week = emptyWeek();
+    sameAllWeek = false;
+  }
+  document.getElementById("same-all-week").checked = sameAllWeek;
+  renderImplCard();
+  renderDays();
+  updateTotals();
+  hideConfirm();
+  loadCorrectionCard();
+}
+
+function renderImplCard() {
+  const el = document.getElementById("impl-card");
+  if (!hasImplantations() && !implManageOpen) {
+    el.innerHTML = `<p class="help-text-small" style="margin:-6px 0 14px">
+      Votre école a plusieurs implantations ? <button class="link-btn" id="btn-open-impl" style="padding:0">Ajoutez-les ici</button>
+      pour commander pour chacune séparément, en une seule fois.
+    </p>`;
+    document.getElementById("btn-open-impl").onclick = () => { implManageOpen = true; renderImplCard(); };
+    return;
+  }
+
+  let html = "";
+  if (hasImplantations()) {
+    html += `<p class="field-label" style="margin-bottom:6px">Implantation</p><div class="impl-tabs">`;
+    implantations.forEach((i) => {
+      const n = mealsOf(weeks[i.id]);
+      html += `<button class="impl-tab ${i.id === currentImpl ? "active" : ""}" data-impl="${escapeHtml(i.id)}">${escapeHtml(i.name)}<span class="impl-count">${n}</span></button>`;
+    });
+    html += `</div>`;
+    const cur = implantations.find((i) => i.id === currentImpl);
+    html += `<p class="impl-current">Vous remplissez la commande de : <strong>${escapeHtml(cur ? cur.name : "")}</strong>.
+      Passez d'un onglet à l'autre, puis envoyez tout en une fois en bas de page.
+      <button class="link-btn" id="btn-toggle-impl" style="padding:0">${implManageOpen ? "Fermer la gestion" : "⚙️ Gérer les implantations"}</button></p>`;
+  }
+
+  if (implManageOpen) {
+    html += `<div class="day-card" style="margin-bottom:16px">
+      <p class="day-card-title">Vos implantations</p>
+      <p class="help-text-small" style="margin-top:-6px">Donnez un nom clair à chaque site (ex. « Rue des Écoles », « Maternelle Centre »). La cuisine le verra tel quel.</p>
+      ${implantations.map((i) => `
+        <div class="impl-row">
+          <input type="text" value="${escapeHtml(i.name)}" data-rename-input="${escapeHtml(i.id)}" maxlength="60" />
+          <button class="link-btn" data-rename="${escapeHtml(i.id)}">Renommer</button>
+          <button class="link-btn" style="color:#a3402e" data-remove="${escapeHtml(i.id)}">Supprimer</button>
+        </div>`).join("")}
+      <div class="impl-row" style="margin-top:12px">
+        <input type="text" id="new-impl-name" placeholder="Nom de la nouvelle implantation" maxlength="60" />
+        <button class="primary-btn" id="btn-add-impl" style="width:auto;padding:9px 16px">+ Ajouter</button>
+      </div>
+      <p class="help-text-small" id="impl-status"></p>
+      ${!hasImplantations() ? `<button class="link-btn" id="btn-cancel-impl">Annuler</button>` : ""}
+    </div>`;
+  }
+  el.innerHTML = html;
+
+  el.querySelectorAll("[data-impl]").forEach((b) => (b.onclick = () => selectImpl(b.dataset.impl)));
+  const toggle = document.getElementById("btn-toggle-impl");
+  if (toggle) toggle.onclick = () => { implManageOpen = !implManageOpen; renderImplCard(); };
+  const cancel = document.getElementById("btn-cancel-impl");
+  if (cancel) cancel.onclick = () => { implManageOpen = false; renderImplCard(); };
+  const addBtn = document.getElementById("btn-add-impl");
+  if (addBtn) addBtn.onclick = addImplantation;
+  const newInput = document.getElementById("new-impl-name");
+  if (newInput) newInput.onkeydown = (e) => { if (e.key === "Enter") addImplantation(); };
+  el.querySelectorAll("[data-rename]").forEach((b) => (b.onclick = () => renameImplantation(b.dataset.rename)));
+  el.querySelectorAll("[data-remove]").forEach((b) => (b.onclick = () => removeImplantation(b.dataset.remove)));
+}
+
+function implStatus(msg, isError) {
+  const s = document.getElementById("impl-status");
+  if (!s) return;
+  s.textContent = msg;
+  s.style.color = isError ? "#a3402e" : "";
+}
+
+async function implRequest(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ schoolName, code: accessCode, ...body }),
+  });
+  return res.json();
+}
+
+async function addImplantation() {
+  const input = document.getElementById("new-impl-name");
+  const name = input.value.trim();
+  if (!name) return implStatus("Indiquez un nom.", true);
+  implStatus("Ajout…");
+  try {
+    const data = await implRequest("/api/implantations/add", { name });
+    if (!data.ok) return implStatus(data.error || "Échec de l'ajout.", true);
+    const added = data.implantations.find((i) => i.name === name.replace(/\s+/g, " "));
+    applyImplantations(data.implantations);
+    if (added) selectImpl(added.id);
+    implStatus(`✓ « ${name} » ajoutée.`);
+    const again = document.getElementById("new-impl-name");
+    if (again) again.focus();
+  } catch (e) {
+    implStatus("Erreur réseau, réessayez.", true);
+  }
+}
+
+async function renameImplantation(id) {
+  const input = document.querySelector(`[data-rename-input="${CSS.escape(id)}"]`);
+  const name = input ? input.value.trim().replace(/\s+/g, " ") : "";
+  if (!name) return implStatus("Le nom ne peut pas être vide.", true);
+  implStatus("Renommage…");
+  try {
+    const data = await implRequest("/api/implantations/rename", { id, name });
+    if (!data.ok) return implStatus(data.error || "Échec du renommage.", true);
+    applyImplantations(data.implantations, { from: id, toName: name });
+    implStatus(`✓ Renommée en « ${name} ».`);
+  } catch (e) {
+    implStatus("Erreur réseau, réessayez.", true);
+  }
+}
+
+async function removeImplantation(id) {
+  const impl = implantations.find((i) => i.id === id);
+  if (!impl || !confirm(`Supprimer l'implantation « ${impl.name} » ?`)) return;
+  implStatus("Suppression…");
+  try {
+    const data = await implRequest("/api/implantations/delete", { id });
+    if (!data.ok) return implStatus(data.error || "Échec de la suppression.", true);
+    if (!data.implantations.length) week = emptyWeek();
+    applyImplantations(data.implantations);
+    implStatus(`✓ « ${impl.name} » supprimée.`);
+  } catch (e) {
+    implStatus("Erreur réseau, réessayez.", true);
+  }
+}
 
 target = renderDeadlineBar();
 document.getElementById("login-week").textContent = `Semaine du ${weekLabelFor(target.monday)}`;
@@ -122,7 +327,18 @@ document.getElementById("btn-continue").addEventListener("click", async () => {
       btn.textContent = "Continuer";
       return;
     }
+    if (data.schoolName) schoolName = data.schoolName;
+    // Nouvelle connexion : on repart d'une saisie vierge.
+    implantations = [];
+    weeks = {};
+    sameByImpl = {};
+    currentImpl = null;
+    implManageOpen = false;
+    week = emptyWeek();
+    sameAllWeek = false;
+    document.getElementById("same-all-week").checked = false;
     showOrderScreen();
+    if (data.implantations && data.implantations.length) applyImplantations(data.implantations);
   } catch (e) {
     errEl.textContent = "Impossible de vérifier le code pour l'instant, réessayez.";
     errEl.style.display = "block";
@@ -141,21 +357,30 @@ function showOrderScreen() {
   document.getElementById("screen-order").style.display = "block";
   document.getElementById("order-week").textContent = `Semaine du ${weekLabelFor(target.monday)}`;
   document.getElementById("order-school-name").textContent = schoolName;
+  renderImplCard();
   renderDays();
   updateTotals();
   loadCorrectionCard();
 }
 
+let correctionToken = 0;
 async function loadCorrectionCard() {
   const box = document.getElementById("correction-card");
   box.style.display = "none";
+  box.innerHTML = "";
+  // Les rectifications concernent toujours UNE fiche : l'implantation affichée
+  // (ou l'école elle-même si elle n'a pas d'implantations).
+  const corrSchoolName = activeSchoolName();
+  const corrLabel = hasImplantations() ? (implantations.find((i) => i.id === currentImpl) || {}).name : "";
+  const myToken = ++correctionToken;
   try {
     const res = await fetch("/api/orders/mine", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ schoolName, code: accessCode, weekKey: weekKeyFor(getCurrentWeekMonday()) }),
+      body: JSON.stringify({ schoolName: corrSchoolName, code: accessCode, weekKey: weekKeyFor(getCurrentWeekMonday()) }),
     });
     const data = await res.json();
+    if (myToken !== correctionToken) return; // l'utilisateur a changé d'onglet entre-temps
     if (!data.ok || !data.order || !data.days) return;
 
     const editableDays = data.days.filter((d) => d.editable);
@@ -169,7 +394,7 @@ async function loadCorrectionCard() {
     function renderCorrectionCard() {
       box.innerHTML = `
         <div class="day-card" style="border-color:#c9a227">
-          <p class="day-card-title">Rectification de la semaine en cours</p>
+          <p class="day-card-title">Rectification de la semaine en cours${corrLabel ? ` — ${escapeHtml(corrLabel)}` : ""}</p>
           <p class="help-text-small" style="margin-top:-8px">
             Chaque jour reste modifiable jusqu'à 9h15 le jour même. Passé cette heure, il se ferme automatiquement.
           </p>
@@ -247,7 +472,7 @@ async function loadCorrectionCard() {
           const res2 = await fetch("/api/orders/correction", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ schoolName, code: accessCode, dayId, delta: deltas[dayId] }),
+            body: JSON.stringify({ schoolName: corrSchoolName, code: accessCode, dayId, delta: deltas[dayId] }),
           });
           const data2 = await res2.json();
           if (!data2.ok) {
@@ -363,6 +588,7 @@ function makeField(dayId, champ, applyToAll) {
 
 document.getElementById("same-all-week").addEventListener("change", (e) => {
   sameAllWeek = e.target.checked;
+  if (currentImpl) sameByImpl[currentImpl] = sameAllWeek;
   if (sameAllWeek) {
     JOURS.forEach((j) => (week[j.id] = { ...week.lundi }));
   }
@@ -391,8 +617,26 @@ function updateTotals() {
   document.getElementById("total-primaire").textContent = totalPrimaire;
   document.getElementById("total-primaire-plus").textContent = totalPrimairePlus;
   document.getElementById("total-soupe").textContent = `${totalSoupe} L`;
-  document.getElementById("btn-submit").disabled = totalRepas === 0;
-  document.getElementById("hint-empty").style.display = totalRepas === 0 ? "block" : "none";
+  // École à plusieurs implantations : rappel du total de chaque site, et le
+  // bouton d'envoi s'active dès qu'au moins une implantation a des repas.
+  const curImpl = implantations.find((i) => i.id === currentImpl);
+  document.getElementById("total-repas").previousElementSibling.textContent =
+    curImpl ? `Total repas / semaine — ${curImpl.name}` : "Total repas / semaine";
+  let groupRepas = totalRepas;
+  const groupBox = document.getElementById("group-totals");
+  if (hasImplantations()) {
+    groupRepas = implantations.reduce((acc, i) => acc + mealsOf(weeks[i.id]), 0);
+    const activeCount = document.querySelector(".impl-tab.active .impl-count");
+    if (activeCount) activeCount.textContent = totalRepas;
+    groupBox.style.display = "block";
+    groupBox.innerHTML = `
+      <p class="total-row" style="margin-top:-4px"><span>Total toutes implantations</span><span class="total-value">${groupRepas} repas</span></p>
+      <p class="help-text-small" style="margin-top:-12px">${implantations.map((i) => `${escapeHtml(i.name)} : ${mealsOf(weeks[i.id])}`).join(" · ")}</p>`;
+  } else {
+    groupBox.style.display = "none";
+  }
+  document.getElementById("btn-submit").disabled = groupRepas === 0;
+  document.getElementById("hint-empty").style.display = groupRepas === 0 ? "block" : "none";
 }
 
 function hideConfirm() {
@@ -450,7 +694,7 @@ async function renderMultiWeeks() {
   const box = document.getElementById("multi-weeks");
   box.innerHTML = `<p class="help-text-small">Chargement…</p>`;
   const mondays = orderableMondays().filter((m) => monthsOfWeek(m).includes(monthKey));
-  const existing = await Promise.all(
+  const existing = hasImplantations() ? await groupExistingWeeks(mondays) : await Promise.all(
     mondays.map(async (m) => {
       try {
         const res = await fetch("/api/orders/mine", {
@@ -465,6 +709,7 @@ async function renderMultiWeeks() {
       }
     })
   );
+  if (monthKey !== document.getElementById("multi-month").value) return;
   box.innerHTML = "";
   mondays.forEach((m, i) => {
     const row = document.createElement("label");
@@ -481,6 +726,79 @@ async function renderMultiWeeks() {
     box.appendChild(row);
   });
   if (!mondays.length) box.innerHTML = `<p class="help-text-small">Aucune semaine disponible pour ce mois.</p>`;
+}
+
+// Une semaine est "déjà commandée" si au moins une implantation l'a déjà commandée.
+async function groupExistingWeeks(mondays) {
+  try {
+    const res = await fetch("/api/orders/group-mine", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schoolName, code: accessCode, weekKeys: mondays.map((m) => weekKeyFor(m)) }),
+    });
+    const data = await res.json();
+    if (!data.ok) return mondays.map(() => false);
+    return mondays.map((m) => Object.values(data.orders[weekKeyFor(m)] || {}).some(Boolean));
+  } catch (e) {
+    return mondays.map(() => false);
+  }
+}
+
+// Envoi groupé (école à plusieurs implantations) : une ligne par implantation
+// et par semaine, un seul appel, un seul email de confirmation.
+async function submitGroup(btn, comment, mondays) {
+  const box = document.getElementById("confirm-box");
+  const idleLabel = multiOn ? "Envoyer la commande du mois" : "Envoyer la commande";
+  const empty = implantations.filter((i) => !weekHasMeals(weeks[i.id]));
+  if (empty.length) {
+    const names = empty.map((i) => `« ${i.name} »`).join(", ");
+    if (!confirm(`Aucun repas n'est encodé pour ${names}. Envoyer quand même la commande des autres implantations ?`)) {
+      btn.disabled = false;
+      btn.textContent = idleLabel;
+      return;
+    }
+  }
+  const orders = [];
+  mondays.forEach((m) => {
+    implantations.forEach((i) => {
+      const w = JSON.parse(JSON.stringify(weeks[i.id]));
+      JOURS.forEach((j) => { if (holidayFor(dateForDayOfWeek(m, j.id))) w[j.id] = emptyDay(); });
+      orders.push({ schoolId: i.id, weekKey: weekKeyFor(m), weekLabel: weekLabelFor(m), week: w });
+    });
+  });
+  try {
+    const res = await fetch("/api/orders/group", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schoolName, schoolEmail, code: accessCode, orders, comment }),
+    });
+    const data = await res.json();
+    box.style.display = "block";
+    if (!data.ok) {
+      box.innerHTML = `<p class="confirm-title">Erreur</p><p class="error-text">${escapeHtml(data.error || "Une erreur est survenue.")}</p>`;
+      btn.disabled = false;
+      btn.textContent = idleLabel;
+      return;
+    }
+    const refusedWeeks = [...new Set((data.refused || []).map((r) => r.weekKey))];
+    const refus = refusedWeeks.length
+      ? `<p class="error-text">${refusedWeeks.length} semaine(s) refusée(s) : échéance dépassée.</p>`
+      : "";
+    const what = mondays.length > 1 ? `${data.savedWeeks} semaine(s) enregistrée(s)` : "Commande envoyée";
+    const sites = `<p class="help-text-small">${data.savedCount} commande(s) d'implantation enregistrée(s).</p>`;
+    box.innerHTML = data.savedCount === 0
+      ? `<p class="confirm-title">Rien n'a été enregistré</p>${refus}`
+      : data.emailSent
+        ? `<p class="confirm-title">✓ ${what}, email de confirmation transmis à ${escapeHtml(schoolEmail)}</p>${sites}${refus}`
+        : `<p class="confirm-title">${what}</p>${sites}<p class="error-text">L'envoi de l'email a échoué : ${escapeHtml(data.emailError || "cause inconnue")}</p>${refus}`;
+    btn.textContent = data.savedCount ? "Commande envoyée" : idleLabel;
+    if (!data.savedCount) btn.disabled = false;
+  } catch (e) {
+    box.style.display = "block";
+    box.innerHTML = `<p class="confirm-title">Erreur réseau</p><p class="error-text">${escapeHtml(e.message)}</p>`;
+    btn.textContent = idleLabel;
+    btn.disabled = false;
+  }
 }
 
 document.getElementById("multi-toggle").addEventListener("change", (e) => {
@@ -501,6 +819,7 @@ async function submitMulti(btn, comment) {
     btn.textContent = "Envoyer la commande du mois";
     return;
   }
+  if (hasImplantations()) return submitGroup(btn, comment, picked);
   const orders = picked.map((m) => {
     const w = JSON.parse(JSON.stringify(week));
     JOURS.forEach((j) => { if (holidayFor(dateForDayOfWeek(m, j.id))) w[j.id] = emptyDay(); });
@@ -541,6 +860,7 @@ document.getElementById("btn-submit").addEventListener("click", async () => {
   btn.textContent = "Envoi…";
   const comment = document.getElementById("input-comment").value.trim();
   if (multiOn) return submitMulti(btn, comment);
+  if (hasImplantations()) return submitGroup(btn, comment, [target.monday]);
 
   try {
     const res = await fetch("/api/orders", {
