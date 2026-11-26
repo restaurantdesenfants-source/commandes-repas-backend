@@ -45,8 +45,36 @@
 
     <div id="cuisine-content" style="display:none"></div>
   </div>
+
+  <div class="card" id="closures-card" style="display:none">
+    <div class="ticket-head">
+      <div>
+        <p class="eyebrow">Planning</p>
+        <h1>🚫 Jours sans service</h1>
+      </div>
+    </div>
+    <p class="help-text-small">Bloquez à l'avance un jour ou une période où la cuisine ne livre pas (formation, fermeture…). Les écoles ne pourront plus commander ni rectifier ces jours-là, comme pendant les vacances scolaires.</p>
+    <div class="field-grid" style="margin-bottom:10px">
+      <div class="field-item">
+        <label>Du</label>
+        <input type="date" id="closure-start" />
+      </div>
+      <div class="field-item">
+        <label>Au (facultatif)</label>
+        <input type="date" id="closure-end" />
+      </div>
+      <div class="field-item">
+        <label>Motif</label>
+        <input type="text" id="closure-label" placeholder="Formation" maxlength="80" />
+      </div>
+    </div>
+    <button class="primary-btn" style="width:auto;padding:9px 16px" id="btn-add-closure">Bloquer ces jours</button>
+    <p class="error-text" id="closure-error" style="display:none"></p>
+    <div id="closures-list" style="margin-top:16px"></div>
+  </div>
 </main>
 
+<script src="/closures.js"></script>
 <script src="/shared.js"></script>
 <script>
 const target = renderDeadlineBar();
@@ -202,6 +230,8 @@ async function tryLoad() {
     document.getElementById("cuisine-content").style.display = "block";
     document.getElementById("btn-refresh").style.display = "inline-flex";
     document.getElementById("week-nav").style.display = "block";
+    document.getElementById("closures-card").style.display = "block";
+    loadClosuresList();
   } else {
     errEl.textContent = "Code cuisine incorrect.";
     errEl.style.display = "block";
@@ -799,7 +829,7 @@ function renderMonthEncodeSection() {
           <tbody>
             ${monthEncodeDays.map((d, i) => `<tr style="${d.holiday ? "opacity:.5" : ""}">
               <td><input type="checkbox" class="month-day-checkbox" data-idx="${i}" ${d.include ? "checked" : ""} ${d.holiday ? "disabled" : ""} style="width:17px;height:17px;accent-color:#c9a227" /></td>
-              <td class="school-col">${d.label}${d.holiday ? ` <span style="color:#a3402e;font-size:12px">(vacances — ${d.holiday})</span>` : ""}</td>
+              <td class="school-col">${d.label}${d.holiday ? ` <span style="color:#a3402e;font-size:12px">(${d.holiday})</span>` : ""}</td>
               <td>${round2(d.soupe)}</td><td>${d.maternelle}</td><td>${d.primaire}</td><td>${d.primairePlus}</td><td style="opacity:.65">${Number(d.maternelle) + Number(d.primaire) + Number(d.primairePlus)}</td>
             </tr>`).join("")}
           </tbody>
@@ -815,7 +845,7 @@ function renderMonthEncodeSection() {
         <span class="school-name">📅 Encoder un mois pour une école</span>
         <button class="link-btn" data-action="toggle-month-encode">Fermer</button>
       </div>
-      <p class="help-text-small">Propose les mêmes quantités pour tous les jours d'école du mois choisi. Les vacances scolaires sont automatiquement exclues. Décochez un jour pour le retirer avant de valider.</p>
+      <p class="help-text-small">Propose les mêmes quantités pour tous les jours d'école du mois choisi. Les vacances scolaires et les jours où la cuisine est fermée sont automatiquement exclus. Décochez un jour pour le retirer avant de valider.</p>
       <div class="field-grid" style="margin-bottom:12px">
         <div class="field-item">
           <label>École</label>
@@ -904,7 +934,7 @@ function generateMonthEncodeDays() {
       weekKey: weekKeyFor(monday),
       label: `${JOURS.find((j) => j.id === dayId).label} ${shortDateLabel(date)}`,
       include: !h,
-      holiday: h ? h.label : null,
+      holiday: h ? closureText(h) : null,
       soupe: monthEncodeDefaults.soupe,
       maternelle: monthEncodeDefaults.maternelle,
       primaire: monthEncodeDefaults.primaire,
@@ -1018,6 +1048,171 @@ function attachAdminToolsHandlers() {
     });
   });
 }
+
+// ---- Jours sans service (formation, fermeture…) ----
+let closuresList = [];
+
+function fmtIsoFr(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+}
+
+function closurePeriodLabel(c) {
+  return c.start === c.end ? `Le ${fmtIsoFr(c.start)}` : `Du ${fmtIsoFr(c.start)} au ${fmtIsoFr(c.end)}`;
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+// Met à jour la liste utilisée par holidayFor (shared.js) sans recharger la page.
+function syncKitchenClosures() {
+  const today = isoDate(new Date());
+  const past = kitchenClosures().filter((c) => c.end < today);
+  window.KITCHEN_CLOSURES = past.concat(closuresList.map((c) => ({ start: c.start, end: c.end, label: c.label })));
+}
+
+async function loadClosuresList() {
+  const box = document.getElementById("closures-list");
+  try {
+    const res = await fetch(`/api/closures?code=${encodeURIComponent(kitchenCode)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      box.innerHTML = `<p class="error-text">${escapeHtml(data.error || "Impossible de charger les jours bloqués.")}</p>`;
+      return;
+    }
+    closuresList = data.closures || [];
+    renderClosuresList();
+  } catch (e) {
+    box.innerHTML = `<p class="error-text">Impossible de charger les jours bloqués : ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderClosuresList() {
+  const box = document.getElementById("closures-list");
+  if (!closuresList.length) {
+    box.innerHTML = `<p class="help-text-small">Aucun jour bloqué à venir.</p>`;
+    return;
+  }
+  box.innerHTML = closuresList.map((c) => {
+    const affected = c.affected || [];
+    let warn = "";
+    if (affected.length) {
+      const lines = affected.map((a) => {
+        const v = a.values || {};
+        const repas = Number(v.maternelle || 0) + Number(v.primaire || 0) + Number(v.primairePlus || 0);
+        const soupe = Number(v.soupe || 0);
+        return `<li>${escapeHtml(a.schoolName)} — ${fmtIsoFr(a.date)} : ${repas} repas${soupe ? ` + ${soupe} L soupe` : ""}</li>`;
+      }).join("");
+      warn = `
+        <div style="margin-top:8px;padding:10px 12px;border:1px solid #e3b5a8;background:#fbf1ee;border-radius:8px">
+          <p style="margin:0 0 6px;color:#a3402e;font-weight:700;font-size:13px">⚠️ Des écoles avaient déjà commandé ces jours-là :</p>
+          <ul style="margin:0 0 8px 18px;padding:0;font-size:13px">${lines}</ul>
+          <p class="help-text-small" style="margin:0 0 8px">Pensez à les prévenir. Vous pouvez remettre ces commandes à 0 d'un clic (chaque changement est noté comme rectification cuisine).</p>
+          <button class="link-btn" data-closure-zero="${c.id}">Mettre ces commandes à 0</button>
+        </div>`;
+    }
+    return `
+      <div class="school-block" style="margin-bottom:10px">
+        <div class="school-block-head">
+          <span class="school-name">${escapeHtml(c.label)}</span>
+          <button class="link-btn" data-closure-delete="${c.id}">Débloquer</button>
+        </div>
+        <p class="help-text-small" style="margin:0">${closurePeriodLabel(c)}</p>
+        ${warn}
+      </div>`;
+  }).join("");
+
+  box.querySelectorAll("[data-closure-delete]").forEach((btn) => {
+    btn.addEventListener("click", () => deleteClosure(btn.dataset.closureDelete));
+  });
+  box.querySelectorAll("[data-closure-zero]").forEach((btn) => {
+    btn.addEventListener("click", () => zeroClosureOrders(btn.dataset.closureZero, btn));
+  });
+}
+
+function showClosureError(msg) {
+  const errEl = document.getElementById("closure-error");
+  errEl.textContent = msg;
+  errEl.style.display = msg ? "block" : "none";
+}
+
+async function addClosure() {
+  showClosureError("");
+  const start = document.getElementById("closure-start").value;
+  const end = document.getElementById("closure-end").value || start;
+  const label = document.getElementById("closure-label").value.trim() || "Fermeture";
+  if (!start) return showClosureError("Choisissez au moins la date de début.");
+  if (end < start) return showClosureError("La date de fin est avant la date de début.");
+  const btn = document.getElementById("btn-add-closure");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/closures", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, start, end, label }),
+    });
+    const data = await res.json();
+    if (!data.ok) return showClosureError(data.error || "Erreur lors de l'enregistrement.");
+    document.getElementById("closure-start").value = "";
+    document.getElementById("closure-end").value = "";
+    document.getElementById("closure-label").value = "";
+    await loadClosuresList();
+    syncKitchenClosures();
+    load();
+  } catch (e) {
+    showClosureError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteClosure(id) {
+  const c = closuresList.find((x) => String(x.id) === String(id));
+  if (!c) return;
+  if (!confirm(`Débloquer « ${c.label} » (${closurePeriodLabel(c).toLowerCase()}) ? Les écoles pourront de nouveau commander ces jours-là.`)) return;
+  try {
+    const res = await fetch("/api/closures/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, id }),
+    });
+    const data = await res.json();
+    if (!data.ok) return showClosureError(data.error || "Erreur lors de la suppression.");
+    await loadClosuresList();
+    syncKitchenClosures();
+    load();
+  } catch (e) {
+    showClosureError(e.message);
+  }
+}
+
+async function zeroClosureOrders(id, btn) {
+  const c = closuresList.find((x) => String(x.id) === String(id));
+  if (!c) return;
+  const n = (c.affected || []).length;
+  if (!confirm(`Remettre à 0 ${n} commande(s) de jour pour « ${c.label} » ? Chaque changement sera noté comme rectification cuisine.`)) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/closures/zero-orders", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: kitchenCode, id }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      btn.disabled = false;
+      return showClosureError(data.error || "Erreur lors de la remise à 0.");
+    }
+    await loadClosuresList();
+    load();
+  } catch (e) {
+    btn.disabled = false;
+    showClosureError(e.message);
+  }
+}
+
+document.getElementById("btn-add-closure").addEventListener("click", addClosure);
 
 async function saveEdit(idx) {
   const order = currentOrders[idx];

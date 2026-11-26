@@ -31,10 +31,27 @@ function isoDate(d) {
   return `${y}-${m}-${day}`;
 }
 
-// Renvoie l'objet vacances (avec son label) si la date tombe dedans, sinon null.
+// Jours bloqués par la cuisine (formation, fermeture…) : fournis par /closures.js,
+// chargé juste avant ce fichier. Liste vide si le chargement a échoué.
+function kitchenClosures() {
+  return (typeof window !== "undefined" && Array.isArray(window.KITCHEN_CLOSURES)) ? window.KITCHEN_CLOSURES : [];
+}
+
+// Renvoie { label, kind } si la date est un jour sans service — vacances scolaires
+// (kind "vacances") ou jour bloqué par la cuisine (kind "fermeture") — sinon null.
 function holidayFor(date) {
   const iso = isoDate(date);
-  return HOLIDAYS_2026_2027.find((h) => iso >= h.start && iso <= h.end) || null;
+  const h = HOLIDAYS_2026_2027.find((x) => iso >= x.start && iso <= x.end);
+  if (h) return { label: h.label, kind: "vacances" };
+  const c = kitchenClosures().find((x) => iso >= x.start && iso <= x.end);
+  if (c) return { label: c.label, kind: "fermeture" };
+  return null;
+}
+
+// Texte affiché pour un jour sans service : "Vacances scolaires (Noël)" ou "Cuisine fermée (Formation)".
+function closureText(h) {
+  if (!h) return "";
+  return h.kind === "fermeture" ? `Cuisine fermée (${h.label})` : `Vacances scolaires (${h.label})`;
 }
 
 function getISOWeek(date) {

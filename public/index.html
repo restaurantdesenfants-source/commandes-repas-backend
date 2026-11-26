@@ -65,7 +65,7 @@
       <p class="day-card-title">Mois à commander</p>
       <select id="multi-month" style="width:100%;padding:10px;margin-bottom:10px"></select>
       <p class="help-text-small" style="margin-top:0">
-        La commande saisie ci-dessus sera appliquée à chaque semaine cochée. Les semaines de vacances scolaires n'apparaissent pas.
+        La commande saisie ci-dessus sera appliquée à chaque semaine cochée. Les semaines sans service (vacances scolaires, cuisine fermée) n'apparaissent pas.
         Décochez une semaine pour la retirer.
       </p>
       <div id="multi-weeks"></div>
@@ -88,6 +88,7 @@
   </div>
 </main>
 
+<script src="/closures.js"></script>
 <script src="/shared.js"></script>
 <script>
 let schoolName = "";
@@ -525,7 +526,7 @@ function renderDays() {
         const note = document.createElement("p");
         note.className = "help-text-small";
         note.style.color = "#a3402e";
-        note.textContent = `${j.label} : vacances scolaires (${h.label}) — pas de service ce jour-là.`;
+        note.textContent = `${j.label} : ${closureText(h)} — pas de service ce jour-là.`;
         container.appendChild(note);
       }
     });
@@ -537,7 +538,7 @@ function renderDays() {
       if (h) {
         week[j.id] = emptyDay();
         card.style.opacity = "0.55";
-        card.innerHTML = `<p class="day-card-title">${j.label}</p><p class="help-text-small" style="color:#a3402e">Vacances scolaires (${h.label}) — pas de service ce jour-là.</p>`;
+        card.innerHTML = `<p class="day-card-title">${j.label}</p><p class="help-text-small" style="color:#a3402e">${closureText(h)} — pas de service ce jour-là.</p>`;
         container.appendChild(card);
         return;
       }
