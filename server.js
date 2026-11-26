@@ -46,9 +46,32 @@ function isoDateUTC(d) {
   return `${y}-${m}-${day}`;
 }
 
+// Jours bloqués par la cuisine (formation, fermeture…), stockés dans la table
+// Supabase "closures". Gardés en mémoire pour que holidayFor reste instantané ;
+// rechargés au démarrage, après chaque ajout/suppression, et toutes les 5 minutes.
+let CLOSURES = [];
+async function loadClosures() {
+  try {
+    const { data, error } = await supabase.from("closures").select("*").order("start_date");
+    if (error) throw error;
+    CLOSURES = (data || []).map((c) => ({ id: c.id, start: c.start_date, end: c.end_date, label: c.label || "Fermeture" }));
+  } catch (e) {
+    // Table absente ou Supabase en pause : on continue sans jours bloqués plutôt que de planter.
+    console.error("Chargement des jours bloqués impossible :", e.message);
+  }
+}
+loadClosures();
+setInterval(loadClosures, 5 * 60 * 1000);
+
+// Renvoie { label, kind } si la date est un jour sans service : vacances scolaires
+// (kind "vacances") ou jour bloqué par la cuisine (kind "fermeture"). Sinon null.
 function holidayFor(date) {
   const iso = isoDateUTC(date);
-  return HOLIDAYS_2026_2027.find((h) => iso >= h.start && iso <= h.end) || null;
+  const h = HOLIDAYS_2026_2027.find((x) => iso >= x.start && iso <= x.end);
+  if (h) return { label: h.label, kind: "vacances" };
+  const c = CLOSURES.find((x) => iso >= x.start && iso <= x.end);
+  if (c) return { label: c.label, kind: "fermeture" };
+  return null;
 }
 
 // ---------- Utilitaires ----------
@@ -769,7 +792,7 @@ app.get("/api/cron/send-reminders", async (req, res) => {
       return holidayFor(d);
     });
     if (allHoliday) {
-      return res.json({ ok: true, skipped: true, reason: "Semaine suivante entièrement en vacances scolaires", weekKey, remindersSent: 0, smsSent: 0 });
+      return res.json({ ok: true, skipped: true, reason: "Semaine suivante sans service (vacances scolaires ou cuisine fermée)", weekKey, remindersSent: 0, smsSent: 0 });
     }
 
     const friday = new Date(monday);
@@ -1299,7 +1322,7 @@ app.post("/api/orders/mine", async (req, res) => {
     const days = JOURS.map((j) => ({
       id: j.id,
       label: j.label,
-      editable: isDayCorrectionOpen(weekKey, j.id),
+      editable: isDayCorrectionOpen(weekKey, j.id) && !holidayFor(dateForDay(weekKey, j.id)),
       date: dateForDay(weekKey, j.id).toISOString(),
     }));
 
@@ -1329,6 +1352,10 @@ app.post("/api/orders/correction", async (req, res) => {
     }
     if (!isDayCorrectionOpen(weekKey, dayId)) {
       return res.status(403).json({ ok: false, error: "La fenêtre de rectification (avant 9h15 le jour même) est fermée pour ce jour." });
+    }
+    const closedDay = holidayFor(dateForDay(weekKey, dayId));
+    if (closedDay) {
+      return res.status(403).json({ ok: false, error: closedDay.kind === "fermeture" ? `Pas de service ce jour-là (cuisine fermée : ${closedDay.label}).` : `Pas de service ce jour-là (vacances scolaires : ${closedDay.label}).` });
     }
 
     const nameLower = await resolveSchoolId(schoolName);
@@ -2256,6 +2283,163 @@ app.get("/api/billing/group-pdf", async (req, res) => {
     });
 
     doc.end();
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// ---------- Jours bloqués par la cuisine (formation, fermeture…) ----------
+
+// Petit script lu par les pages École et Cuisine AVANT shared.js, pour que les
+// jours bloqués soient connus dès l'affichage (comme les vacances scolaires).
+app.get("/closures.js", async (req, res) => {
+  await loadClosures();
+  res.set("Cache-Control", "no-store");
+  res.type("application/javascript");
+  const list = CLOSURES.map((c) => ({ start: c.start, end: c.end, label: c.label }));
+  res.send(`window.KITCHEN_CLOSURES = ${JSON.stringify(list)};`);
+});
+
+function isIsoDate(s) {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s + "T00:00:00Z"));
+}
+
+// Jours de service (lun/mar/jeu/ven) compris entre deux dates ISO incluses.
+function serviceDaysBetween(start, end) {
+  const out = [];
+  const dayIdMap = { 1: "lundi", 2: "mardi", 4: "jeudi", 5: "vendredi" };
+  const last = new Date(end + "T00:00:00Z");
+  for (let d = new Date(start + "T00:00:00Z"); d <= last; d.setUTCDate(d.getUTCDate() + 1)) {
+    const dayId = dayIdMap[d.getUTCDay()];
+    if (!dayId) continue;
+    out.push({ date: isoDateUTC(d), dayId, weekKey: getISOWeekKeyForDate(new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())) });
+  }
+  return out;
+}
+
+// Commandes déjà enregistrées (avec au moins un repas ou de la soupe) sur les
+// jours d'une fermeture : la cuisine doit le savoir pour prévenir les écoles.
+async function ordersOnClosure(closure) {
+  const days = serviceDaysBetween(closure.start, closure.end);
+  const weekKeys = [...new Set(days.map((d) => d.weekKey))];
+  if (!weekKeys.length) return [];
+  const { data, error } = await supabase.from("orders").select("*").in("week_key", weekKeys);
+  if (error) throw error;
+  const affected = [];
+  for (const o of data || []) {
+    for (const d of days.filter((x) => x.weekKey === o.week_key)) {
+      const v = (o.week || {})[d.dayId] || {};
+      const total = Number(v.maternelle || 0) + Number(v.primaire || 0) + Number(v.primairePlus || 0) + Number(v.soupe || 0);
+      if (total > 0) {
+        affected.push({ schoolName: o.school_name, weekKey: o.week_key, dayId: d.dayId, date: d.date, values: v });
+      }
+    }
+  }
+  affected.sort((a, b) => (a.date + a.schoolName).localeCompare(b.date + b.schoolName));
+  return affected;
+}
+
+function checkKitchen(req, res) {
+  const code = (req.body && req.body.code) || req.query.code;
+  if (!process.env.KITCHEN_CODE || code !== process.env.KITCHEN_CODE) {
+    res.status(401).json({ ok: false, error: "Code cuisine incorrect." });
+    return false;
+  }
+  return true;
+}
+
+// Liste des jours bloqués à venir (et ceux en cours), avec les commandes concernées.
+app.get("/api/closures", async (req, res) => {
+  try {
+    if (!checkKitchen(req, res)) return;
+    await loadClosures();
+    const today = isoDateUTC(new Date());
+    const list = [];
+    for (const c of CLOSURES.filter((x) => x.end >= today)) {
+      list.push({ ...c, affected: await ordersOnClosure(c) });
+    }
+    res.json({ ok: true, closures: list });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez. (La table « closures » existe-t-elle dans Supabase ?)" });
+  }
+});
+
+app.post("/api/closures", async (req, res) => {
+  try {
+    if (!checkKitchen(req, res)) return;
+    const { start, label } = req.body || {};
+    const end = (req.body && req.body.end) || start;
+    if (!isIsoDate(start) || !isIsoDate(end)) {
+      return res.status(400).json({ ok: false, error: "Dates invalides." });
+    }
+    if (end < start) {
+      return res.status(400).json({ ok: false, error: "La date de fin est avant la date de début." });
+    }
+    if (!serviceDaysBetween(start, end).length) {
+      return res.status(400).json({ ok: false, error: "Aucun jour de service (lundi, mardi, jeudi, vendredi) dans cette période." });
+    }
+    const cleanLabel = String(label || "").trim().slice(0, 80) || "Fermeture";
+    const { data, error } = await supabase.from("closures").insert({ start_date: start, end_date: end, label: cleanLabel }).select().single();
+    if (error) throw error;
+    await loadClosures();
+    const closure = { id: data.id, start, end, label: cleanLabel };
+    res.json({ ok: true, closure: { ...closure, affected: await ordersOnClosure(closure) } });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez. (La table « closures » existe-t-elle dans Supabase ?)" });
+  }
+});
+
+app.post("/api/closures/delete", async (req, res) => {
+  try {
+    if (!checkKitchen(req, res)) return;
+    const { id } = req.body || {};
+    if (!id) return res.status(400).json({ ok: false, error: "Informations manquantes." });
+    const { error } = await supabase.from("closures").delete().eq("id", id);
+    if (error) throw error;
+    await loadClosures();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
+  }
+});
+
+// Met à 0 les commandes déjà passées sur les jours d'une fermeture. Chaque
+// changement est journalisé comme une rectification "cuisine" (visible dans
+// l'alerte ⚠️ et en facturation), et la cuisine reçoit le récapitulatif habituel.
+app.post("/api/closures/zero-orders", async (req, res) => {
+  try {
+    if (!checkKitchen(req, res)) return;
+    const { id } = req.body || {};
+    await loadClosures();
+    const closure = CLOSURES.find((c) => String(c.id) === String(id));
+    if (!closure) return res.status(404).json({ ok: false, error: "Fermeture introuvable." });
+    const affected = await ordersOnClosure(closure);
+    const groups = {};
+    affected.forEach((a) => {
+      const k = a.weekKey + "|" + a.schoolName;
+      if (!groups[k]) groups[k] = { weekKey: a.weekKey, schoolName: a.schoolName, days: [] };
+      groups[k].days.push(a.dayId);
+    });
+    const bySchool = {};
+    for (const g of Object.values(groups)) {
+      const updates = {};
+      g.days.forEach((dayId) => { updates[dayId] = { soupe: 0, maternelle: 0, primaire: 0, primairePlus: 0, dessert: 0 }; });
+      const { schoolName, changedDays } = await applyAdminDayEdits(g.schoolName, g.weekKey, updates);
+      if (!bySchool[schoolName]) bySchool[schoolName] = [];
+      bySchool[schoolName].push(...changedDays);
+    }
+    for (const [schoolName, allChangedDays] of Object.entries(bySchool)) {
+      try {
+        await sendAdminEditKitchenEmail({ schoolName, allChangedDays });
+      } catch (e) {
+        console.error("Échec email cuisine (fermeture) :", e.message);
+      }
+    }
+    res.json({ ok: true, zeroed: affected.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "Erreur serveur, réessayez." });
